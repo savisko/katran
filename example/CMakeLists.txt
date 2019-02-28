@@ -4,8 +4,10 @@ set (CMAKE_CXX_STANDARD 14)
 
 # thrift cmake macro
 find_program(THRIFT1 thrift1)
-set(THRIFT_TEMPLATES ${CMAKE_SOURCE_DIR}/deps/fbthrift/thrift/compiler/generate/templates)
-include (${CMAKE_SOURCE_DIR}/deps/fbthrift/ThriftLibrary.cmake)
+#set(THRIFT_TEMPLATES ${CMAKE_SOURCE_DIR}/deps/fbthrift/thrift/compiler/generate/templates)
+set(THRIFT_TEMPLATES ${CMAKE_SOURCE_DIR}/../fbthrift/thrift/compiler/generate/templates)
+#include (${CMAKE_SOURCE_DIR}/deps/fbthrift/ThriftLibrary.cmake)
+include (${CMAKE_SOURCE_DIR}/../fbthrift/ThriftLibrary.cmake)
 set(THRIFT_PREFIX "katran/if")
 set(THRIFT_DIR ${CMAKE_BINARY_DIR}/thrift-out/${THRIFT_PREFIX})
 file(MAKE_DIRECTORY ${THRIFT_DIR})
@@ -38,12 +40,18 @@ find_library(LIBCONCURRENCY libconcurrency.a concurrency)
 find_library(LIBTRANSPORT libtransport.a transport)
 find_library(LIBASYNC libasync.a async)
 find_library(LIBPROTOCOL libprotocol.a protocol)
-find_library(LIBGSS gssapi_krb5)
+#find_library(LIBGSS gssapi_krb5)
+find_library(LIBGSS
+             NAMES libgssapi_krb5.so.2
+             PATHS /usr/lib/x86_64-linux-gnu/)
 find_library(LIBLZ4 liblz4.so lz4)
 find_library(LIBSNAPPY libsnappy.a snappy)
 find_library(LIBZSTD libzstd.a zstd)
 find_library(LIBBOOST_CONTEXT libboost_context.a boost_context)
 find_library(LIBRE2 libre2.a re2)
+find_library(LIBRE2
+             NAMES libre2.so
+             PATHS /usr/lib/x86_64-linux-gnu/)
 find_library(LIBSODIUM libsodium.a libsodium)
 find_library(LIBFIZZ libfizz.a libfizz)
 

@@ -15,14 +15,20 @@
  # with this program; if not, write to the Free Software Foundation, Inc.,
  # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-set -xeo pipefail
+#set -xeo pipefail
+set -eo pipefail
 NCPUS=$(cat /proc/cpuinfo  | grep processor | wc -l)
-ROOT_DIR=$(pwd)
-DEPS_DIR="${ROOT_DIR}/deps"
-CLANG_DIR="${DEPS_DIR}/clang/clang+llvm-5.0.0-linux-x86_64-ubuntu16.04"
+#ROOT_DIR=$(pwd)
+#DEPS_DIR="${ROOT_DIR}/deps"
+#CLANG_DIR="${DEPS_DIR}/clang/clang+llvm-5.0.0-linux-x86_64-ubuntu16.04"
+
+BUILD_EXAMPLE_GRPC=1
+BUILD_EXAMPLE_THRIFT=1
 
 if [ ! -z "$FORCE_INSTALL" ]; then
-    rm -rf ./deps
+#    rm -rf ./deps
+    echo "$FORCE_INSTALL is disabled. Remove ./deps manually."
+    exit 2
 fi
 
 if [ ! -z "$BUILD_EXAMPLE_THRIFT" ]; then
@@ -30,12 +36,15 @@ if [ ! -z "$BUILD_EXAMPLE_THRIFT" ]; then
     export CMAKE_BUILD_EXAMPLE_THRIFT="$BUILD_EXAMPLE_THRIFT"
 fi
 
-if [ -z "$BUILD_EXAMPLE_GRPC" ]; then
+if [ ! -z "$BUILD_EXAMPLE_GRPC" ]; then
     BUILD_EXAMPLE_GRPC=1
     export CMAKE_BUILD_EXAMPLE_GRPC="$BUILD_EXAMPLE_GRPC"
 fi
 
-mkdir deps || true
+if [ ! -d deps ]; then
+    mkdir deps
+fi
+#mkdir deps || true
 
 get_dev_tools() {
     sudo apt-get update
@@ -306,6 +315,7 @@ katran_oss_tests_fixup() {
 }
 
 build_katran() {
+    echo "build_katran() started."
     pushd .
     rm -rf ./build
     mkdir build
@@ -313,37 +323,47 @@ build_katran() {
     cmake ..
     make -j $NCPUS
     popd
-     ./build_bpf_modules_opensource.sh 2>/dev/null
+#     ./build_bpf_modules_opensource.sh 2>/dev/null
+    echo "build_katran() finished."
+}
+
+build_bpf_modules() {
+    echo "build_bpf_modules() started."
+    ./build_bpf_modules_opensource.sh
+    echo "build_bpf_modules() finished."
 }
 
 test_katran() {
+    echo "test_katran() started."
     pushd .
     cd build/katran/lib/tests/
     ctest -v ./*
     cd ../testing/
     ctest -v ./*
     popd
+    echo "test_katran() finished."
 }
 
-get_dev_tools
-get_folly
-get_clang
-get_required_libs
-get_gtest
-get_libbpf
-if [ "$BUILD_EXAMPLE_THRIFT" -eq 1 ]; then
-  get_mstch
-  get_fizz
-  get_wangle
-  get_zstd
-  get_rsocket
-  get_fbthrift
-fi
-if [ "$BUILD_EXAMPLE_GRPC" -eq 1 ]; then
-  get_grpc
-fi
+#get_dev_tools
+#get_folly
+#get_clang
+#get_required_libs
+#get_gtest
+#get_libbpf
+#if [ "$BUILD_EXAMPLE_THRIFT" == "1" ]; then
+#  get_mstch
+#  get_fizz
+#  get_wangle
+#  get_zstd
+#  get_rsocket
+#  get_fbthrift
+#fi
+#if [ "$BUILD_EXAMPLE_GRPC" == "1" ]; then
+#  get_grpc
+#fi
 if [ -z "$INSTALL_DEPS_ONLY" ]; then
   katran_oss_tests_fixup
   build_katran
+  build_bpf_modules
   test_katran
 fi

@@ -16,7 +16,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-maybe-uninitialized -Wdeprecated-de
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=deprecated-declarations")
 
 # system libs
-find_library(GLOG libglog.a glog)
+find_library(GLOG glog)
 find_library(LIBELF libelf.a elf)
 find_library(LIBMNL libmnl.a mnl)
 find_library(GFLAGS libgflags.a gflags)
@@ -27,7 +27,15 @@ find_library(LIBUNWIND libunwind.a unwind)
 find_library(LIBLZMA liblzma.a lzma)
 find_library(LIBZ libz.a z)
 find_library(LIBDC libdouble-conversion.a double-conversion)
-find_library(BPF libbpf.a PATHS ${LIBBPF_PATH} NO_DEFAULT_PATH)
+find_library(BPF libbpf.a PATHS ${LIBBPF_PATH})
+find_library(LIBDL dl)
+find_library(BOOST_PROGOPT boost_program_options)
+find_library(BOOST_FS boost_filesystem)
+find_library(BOOST_SYSTEM boost_system)
+find_library(BOOST_REGEX boost_regex)
+find_library(LIBIBERTY iberty)
+find_library(LIBCRYPTO crypto)
+
 add_library(murmur3 STATIC
     MurmurHash3.h
     MurmurHash3.cpp
@@ -53,6 +61,13 @@ target_link_libraries(iphelpers
     "${GFLAGS}"
     "${PTHREAD}"
     "${LIBDC}"
+    "${LIBDL}"
+    "${BOOST_PROGOPT}"
+    "${BOOST_FS}"
+    "${BOOST_SYSTEM}"
+    "${BOOST_REGEX}"
+    "${LIBIBERTY}"
+    "${LIBCRYPTO}"
 )
 
 add_library(bpfadapter STATIC
@@ -75,7 +90,14 @@ set(BPFADAPTER_DEPS
     "${LIBZ}"
     "${LIBMNL}"
     "${FOLLY}"
+    "${LIBDL}"
     "${LIBDC}"
+    "${BOOST_PROGOPT}"
+    "${BOOST_FS}"
+    "${BOOST_SYSTEM}"
+    "${BOOST_REGEX}"
+    "${LIBIBERTY}"
+    "${LIBCRYPTO}"
 )
 
 target_link_libraries(bpfadapter "${BPFADAPTER_DEPS}")
@@ -92,6 +114,7 @@ target_link_libraries(katranlb
     bpfadapter
     chhelpers
     iphelpers
+    "${GLOG}"
     "${GFLAGS}"
 )
 

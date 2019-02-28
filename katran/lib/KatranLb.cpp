@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <iterator>
 #include <stdexcept>
+#include <iostream>
 
 #include <folly/Format.h>
 #include <folly/lang/Bits.h>
@@ -348,7 +349,9 @@ void KatranLb::attachBpfProgs() {
   }
   int res;
   auto main_fd = bpfAdapter_.getProgFdByName("xdp-balancer");
+  std::cout << "main_fd=" << main_fd << std::endl;
   auto interface_index = ctlValues_[kMainIntfPos].ifindex;
+  std::cout << "interface_index=" << interface_index << std::endl;
   if (standalone_) {
     // attaching main bpf prog in standalone mode
     res = bpfAdapter_.modifyXdpProg(main_fd, interface_index);

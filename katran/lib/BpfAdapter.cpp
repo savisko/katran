@@ -27,6 +27,7 @@
 #include <cstring>
 #include <ctime>
 #include <stdexcept>
+#include <iostream>
 
 extern "C" {
 #include <arpa/inet.h>
@@ -483,9 +484,14 @@ int BpfAdapter::modifyXdpProg(
   }
 
   int ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+  if (ret < 0) {
+    PLOG(ERROR) << "Immediate error receiving netlink message";
+    return -1;
+  }
   while (ret > 0) {
     ret = mnl_cb_run(buf, ret, seq, portId, nullptr, nullptr);
     if (ret <= MNL_CB_STOP) {
+      PLOG(ERROR) << __func__ << ": mnl_cb_run() failed; ret=" << ret;
       break;
     }
     ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
