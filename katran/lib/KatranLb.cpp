@@ -21,9 +21,135 @@
 #include <stdexcept>
 #include <iostream>
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <unistd.h>
+#include <pthread.h>
+#include <sys/sysinfo.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <sys/mman.h>
+#include <sys/poll.h>
+#include <stdlib.h>
+
 #include <folly/Format.h>
 #include <folly/lang/Bits.h>
 #include <glog/logging.h>
+
+extern "C" {
+typedef enum bpf_perf_event_ret (*perf_event_print_fn)(void *data, int size);
+
+int perf_event_mmap(int fd);
+int perf_event_mmap_header(int fd, struct perf_event_mmap_page **header);
+/* return LIBBPF_PERF_EVENT_DONE or LIBBPF_PERF_EVENT_ERROR */
+int perf_event_poller(int fd, perf_event_print_fn output_fn);
+int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **headers,
+                int num_fds, perf_event_print_fn output_fn);
+
+void* katran_hw_accel_daemon(void *arg);
+};
+
+#define MAX_CPUS 128
+#define SAMPLE_SIZE 64
+
+static int numcpus = 0;
+static int page_size;
+static int page_cnt = 8;
+//static struct perf_event_mmap_page *header;
+static int pmu_fds[MAX_CPUS];
+static struct perf_event_mmap_page *headers[MAX_CPUS];
+
+
+static enum bpf_perf_event_ret print_bpf_output(void *data, int size)
+{
+    struct sample_event {
+        __u16 cookie;
+        __u16 pkt_len;
+        __u8  pkt_data[SAMPLE_SIZE];
+    } __attribute__ ((packed)) *e = reinterpret_cast<struct sample_event*>(data);
+    int i;
+
+    if (e->cookie != 0xdead) {
+        printf("BUG cookie %x sized %d\n",
+               e->cookie, size);
+        return LIBBPF_PERF_EVENT_ERROR;
+    }
+
+    printf("Pkt len: %-5d bytes. Ethernet hdr: ", e->pkt_len);
+    for (i = 0; i < 14 && i < e->pkt_len; i++)
+        printf("%02x ", e->pkt_data[i]);
+    printf("\n");
+
+    return LIBBPF_PERF_EVENT_CONT;
+}
+
+int perf_event_mmap_header(int fd, struct perf_event_mmap_page **header)
+{
+    void *base;
+    int mmap_size;
+
+    page_size = getpagesize();
+    mmap_size = page_size * (page_cnt + 1);
+
+    base = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (base == MAP_FAILED) {
+        printf("mmap err\n");
+        return -1;
+    }
+
+    *header = reinterpret_cast<struct perf_event_mmap_page*>(base);
+    return 0;
+}
+
+int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **headers, int num_fds, perf_event_print_fn output_fn)
+{
+    enum bpf_perf_event_ret ret;
+    struct pollfd *pfds;
+    void *buf = NULL;
+    size_t len = 0;
+    int i;
+
+    pfds = calloc(num_fds, sizeof(*pfds));
+    if (!pfds)
+        return LIBBPF_PERF_EVENT_ERROR;
+
+    for (i = 0; i < num_fds; i++) {
+        pfds[i].fd = fds[i];
+        pfds[i].events = POLLIN;
+    }
+
+    for (;;) {
+        poll(pfds, num_fds, 1000);
+        for (i = 0; i < num_fds; i++) {
+            if (!pfds[i].revents)
+                continue;
+
+            ret = bpf_perf_event_read_simple(headers[i],
+                             page_cnt * page_size,
+                             page_size, &buf, &len,
+                             bpf_perf_event_print,
+                             output_fn);
+            if (ret != LIBBPF_PERF_EVENT_CONT)
+                break;
+        }
+    }
+    free(buf);
+    free(pfds);
+
+    return ret;
+}
+
+void* katran_hw_accel_daemon(void *arg)
+{
+    int ret;
+
+    ret = ::perf_event_poller_multi(pmu_fds, headers, numcpus, &print_bpf_output);
+    (void)ret;
+
+    return NULL;
+}
+
 
 namespace katran {
 
@@ -44,6 +170,7 @@ KatranLb::KatranLb(const KatranConfig& config)
       bpfAdapter_(!config.testing),
       ctlValues_(kCtlMapSize),
       standalone_(true),
+      rootMapFd_(-1),
       forwardingCores_(config.forwardingCores),
       numaNodes_(config.numaNodes),
       lruMapsFd_(kMaxForwardingCores) {
@@ -161,7 +288,8 @@ void KatranLb::initialSanityChecking() {
                                    "stats",
                                    "ctl_array",
                                    "lru_maps_mapping",
-                                   "quic_mapping"};
+                                   "quic_mapping",
+                                   "hw_accel_map"};
 
   res = getKatranProgFd();
   if (res < 0) {
@@ -292,6 +420,77 @@ void KatranLb::featureDiscovering() {
   }
 }
 
+static inline int sys_perf_event_open(struct perf_event_attr *attr,
+              pid_t pid, int cpu, int group_fd,
+              unsigned long flags)
+{
+    int fd;
+
+    fd = syscall(__NR_perf_event_open, attr, pid, cpu,
+             group_fd, flags);
+
+    return fd;
+}
+
+static bool test_bpf_perf_event(int map_fd, int num)
+{
+    struct perf_event_attr attr = {
+        .type = PERF_TYPE_SOFTWARE,
+        .config = PERF_COUNT_SW_BPF_OUTPUT,
+        .sample_type = PERF_SAMPLE_RAW,
+        .wakeup_events = 1 /* get an fd notification for every event */
+    };
+    int i;
+
+    for (i = 0; i < num; i++) {
+        int key = i;
+
+        pmu_fds[i] = sys_perf_event_open(&attr, -1/*pid*/, i/*cpu*/,
+                         -1/*group_fd*/, 0);
+
+        if (pmu_fds[i] < 0) {
+            LOG(ERROR) << "sys_perf_event_open() failed for CPU " << i;
+            return false;
+        }
+        if (bpf_map_update_elem(map_fd, &key, &pmu_fds[i], BPF_ANY) != 0) {
+            LOG(ERROR) << "bpf_map_update_elem() failed for CPU " << i;
+            return false;
+        }
+        ::ioctl(pmu_fds[i], PERF_EVENT_IOC_ENABLE, 0);
+    }
+
+    return true;
+}
+
+bool KatranLb::createHwAccelMaps() {
+    int map_fd = bpfAdapter_.getMapFdByName("hw_accel_map");
+    if (map_fd < 0) {
+        VLOG(4) << "Cannot find fd for " << "hw_accel_map";
+        return false;
+    }
+
+    numcpus = ::get_nprocs();
+
+    if (numcpus < 0 || numcpus > MAX_CPUS)
+        numcpus = MAX_CPUS;
+
+    if (!test_bpf_perf_event(map_fd, numcpus))
+        return false;
+
+    for (int i = 0; i < numcpus; i++)
+            if (::perf_event_mmap_header(pmu_fds[i], &headers[i]) < 0)
+                return false;
+
+    pthread_t th_id;
+    int res = pthread_create(&th_id, NULL, &katran_hw_accel_daemon, NULL);
+    if (res != 0) {
+        LOG(ERROR) << "pthread_create() failed: " << res;
+        return false;
+    }
+
+    return true;
+}
+
 void KatranLb::loadBpfProgs() {
   int res;
   initLrus();
@@ -310,6 +509,10 @@ void KatranLb::loadBpfProgs() {
 
   initialSanityChecking();
   featureDiscovering();
+
+  if (!createHwAccelMaps()) {
+      throw std::invalid_argument("can't create HW acceleration maps");
+  }
 
   // add values to main prog ctl_array
   std::vector<uint32_t> balancer_ctl_keys = {kMacAddrPos};
@@ -352,7 +555,9 @@ void KatranLb::attachBpfProgs() {
   std::cout << "main_fd=" << main_fd << std::endl;
   auto interface_index = ctlValues_[kMainIntfPos].ifindex;
   std::cout << "interface_index=" << interface_index << std::endl;
+  std::cout << "config_.mainInterface=" << config_.mainInterface << std::endl;
   if (standalone_) {
+      std::cout << "attaching main bpf prog in standalone mode" << std::endl;
     // attaching main bpf prog in standalone mode
     res = bpfAdapter_.modifyXdpProg(main_fd, interface_index);
     if (res != 0) {
@@ -361,6 +566,7 @@ void KatranLb::attachBpfProgs() {
           "to main inteface");
     }
   } else {
+      std::cout << "we are in \"shared\" mode and must register ourself in root xdp prog" << std::endl;
     // we are in "shared" mode and must register ourself in root xdp prog
     rootMapFd_ = bpfAdapter_.getPinnedBpfObject(config_.rootMapPath);
     if (rootMapFd_ < 0) {
@@ -373,6 +579,7 @@ void KatranLb::attachBpfProgs() {
   }
 
   if (config_.enableHc) {
+      std::cout << "attaching healthchecking bpf prog." << std::endl;
     // attaching healthchecking bpf prog.
     auto hc_fd = getHealthcheckerProgFd();
     res = bpfAdapter_.addTcBpfFilter(

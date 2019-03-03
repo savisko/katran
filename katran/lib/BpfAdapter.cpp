@@ -491,7 +491,9 @@ int BpfAdapter::modifyXdpProg(
   while (ret > 0) {
     ret = mnl_cb_run(buf, ret, seq, portId, nullptr, nullptr);
     if (ret <= MNL_CB_STOP) {
-      PLOG(ERROR) << __func__ << ": mnl_cb_run() failed; ret=" << ret;
+      if (ret != MNL_CB_STOP) {
+          PLOG(ERROR) << __func__ << ": mnl_cb_run() failed; ret=" << ret;
+      }
       break;
     }
     ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));

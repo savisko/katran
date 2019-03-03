@@ -1,0 +1,21 @@
+																																		rx_handlers.handle_rx_cqe -> mlx5e_handle_rx_cqe			 ->
+__do_softirq ->	softirq_vec[NET_RX_SOFTIRQ].action -> net_rx_action            ->														rx_handlers.handle_rx_cqe -> mlx5e_handle_rx_cqe_rep		 ->
+										  			  ep_poll-> napi_busy_loop ->
+																					napi->poll -> mlx5e_napi_poll -> mlx5e_poll_rx_cq 																			wqe.skb_from_cqe -> 		mlx5e_skb_from_cqe_linear			->
+netpoll_send_udp													
+										  			  netpoll_poll_dev	       ->														rx_handlers.handle_rx_cqe -> mlx5i_handle_rx_cqe			 ->
+netpoll_send_skb_on_dev																																																																	mlx5e_xdp_handle -> bpf_prog_run_xdp
+																																		rq->handle_rx_cqe -> mlx5e_ipsec_handle_rx_cqe				 ->
+ 												           																																																						
+																															
+																																		rx_handlers.handle_rx_cqe_mpwqe -> mlx5e_handle_rx_cqe_mpwrq -> 		mpwqe.skb_from_cqe_mpwrq -> mlx5e_skb_from_cqe_mpwrq_linear		->
+
+																																		
+																																		
+																																		
+																																		
+																																		
+																																		
+* from mlx5e_build_rx_skb():
+	skb->mark = be32_to_cpu(cqe->sop_drop_qpn) & MLX5E_TC_FLOW_ID_MASK;
+																																		

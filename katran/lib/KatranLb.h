@@ -517,6 +517,8 @@ class KatranLb {
    */
   void featureDiscovering();
 
+  bool createHwAccelMaps();
+
   /**
    * helper function to validate that specified string is a valid ip address
    * (or network prefix if allowNetAddr is equal to true)

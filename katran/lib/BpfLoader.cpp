@@ -17,7 +17,23 @@
 
 #include "BpfLoader.h"
 
+#include <iostream>
+
 #include <glog/logging.h>
+
+/* BEGIN: From libbpf */
+
+#define MAX_ERRNO       4095
+
+#define IS_ERR_VALUE(x) ((x) >= (unsigned long)-MAX_ERRNO)
+
+static inline bool IS_ERR(const void *ptr)
+{
+    return IS_ERR_VALUE((unsigned long)ptr);
+}
+
+/* END: From libbpf */
+
 
 namespace katran {
 
@@ -108,8 +124,12 @@ int BpfLoader::loadBpfFile(
     const bpf_prog_type type,
     bool use_names) {
   auto obj = ::bpf_object__open(path.c_str());
+  std::cout << "::bpf_object__open(" << path << ") => " << (void*) obj << std::endl;
   if (obj == nullptr) {
     return kError;
+  }
+  if (IS_ERR(obj)) {
+      return kError;
   }
   return loadBpfObject(obj, path, type);
 }

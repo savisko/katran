@@ -9,6 +9,14 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#define bpf_debug(fmt, ...) \
+({ \
+char ____fmt[] = fmt; \
+bpf_trace_printk(____fmt, sizeof(____fmt), \
+##__VA_ARGS__); \
+})
+
+
 #include "balancer_consts.h"
 #include "balancer_structs.h"
 #include "balancer_maps.h"
@@ -18,6 +26,17 @@
 #include "pckt_encap.h"
 #include "pckt_parsing.h"
 #include "handle_icmp.h"
+
+
+#define SAMPLE_SIZE 64ul
+#define MAX_CPUS 128
+
+struct bpf_map_def SEC("maps") hw_accel_map = {
+    .type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+    .key_size = sizeof(int),
+    .value_size = sizeof(u32),
+    .max_entries = MAX_CPUS,
+};
 
 
 __attribute__((__always_inline__))
@@ -58,8 +77,9 @@ static inline bool is_under_flood(__u64 *cur_time) {
   return false;
 }
 
-__attribute__((__always_inline__))
-static inline bool get_packet_dst(struct real_definition **real,
+__attribute__((__noinline__))
+static bool get_packet_dst(struct xdp_md *ctx,
+                           struct real_definition **real,
                                   struct packet_description *pckt,
                                   struct vip_meta *vip_info,
                                   bool is_ipv6,
@@ -119,15 +139,24 @@ static inline bool get_packet_dst(struct real_definition **real,
     hash = get_packet_hash(pckt, hash_16bytes) % RING_SIZE;
     key = RING_SIZE * (vip_info->vip_num) + hash;
 
+    bpf_debug("vip_num=%u\n", vip_info->vip_num);
+    bpf_debug("RING_SIZE=%u, key=%u\n", RING_SIZE, key);
+
     real_pos = bpf_map_lookup_elem(&ch_rings, &key);
     if(!real_pos) {
+        bpf_debug("real_pos - not found\n");
       return false;
     }
     key = *real_pos;
+    bpf_debug("real key=%u\n", key);
+  }
+  else {
+      bpf_debug("src_found\n");
   }
   pckt->real_index = key;
   *real = bpf_map_lookup_elem(&reals, &key);
   if (!(*real)) {
+      bpf_debug("real server not found\n");
     return false;
   }
   if (!(vip_info->flags & F_LRU_BYPASS) && !under_flood) {
@@ -135,6 +164,7 @@ static inline bool get_packet_dst(struct real_definition **real,
       new_dst_lru.atime = cur_time;
     }
     new_dst_lru.pos = key;
+    bpf_debug("calling bpf_map_update_elem()\n");
     bpf_map_update_elem(lru_map, &pckt->flow, &new_dst_lru, BPF_ANY);
   }
   return true;
@@ -290,7 +320,7 @@ static inline int process_encaped_pckt(void **data, void **data_end,
 }
 
 __attribute__((__always_inline__))
-static inline int process_packet(void *data, __u64 off, void *data_end,
+static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void *data_end,
                                  bool is_ipv6, struct xdp_md *xdp) {
 
   struct ctl_value *cval;
@@ -371,6 +401,7 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
     vip.port = 0;
     vip_info = bpf_map_lookup_elem(&vip_map, &vip);
     if (!vip_info) {
+      //bpf_debug("VIP not found - XDP_PASS\n");
       return XDP_PASS;
     }
 
@@ -380,6 +411,8 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
       pckt.flow.port16[1] = 0;
     }
   }
+  //bpf_debug("\n");
+  bpf_debug("VIP found\n");
 
   if (data_end - data > MAX_PCKT_SIZE) {
 #ifdef ICMP_TOOBIG_GENERATION
@@ -402,6 +435,7 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
   __u32 stats_key = MAX_VIPS + LRU_CNTRS;
   data_stats = bpf_map_lookup_elem(&stats, &stats_key);
   if (!data_stats) {
+      bpf_debug("No stats - XDP_DROP\n");
     return XDP_DROP;
   }
 
@@ -419,6 +453,7 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
         pckt.real_index = key;
         dst = bpf_map_lookup_elem(&reals, &key);
         if (!dst) {
+            bpf_debug("F_QUIC_VIP - XDP_DROP\n");
           return XDP_DROP;
         }
       }
@@ -434,10 +469,12 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
     __u32 cpu_num = bpf_get_smp_processor_id();
     void *lru_map = bpf_map_lookup_elem(&lru_maps_mapping, &cpu_num);
     if (!lru_map) {
+        bpf_debug("lru_map NOT found for cpu_num=%u\n", cpu_num);
       lru_map = &fallback_lru_cache;
       __u32 lru_stats_key = MAX_VIPS + FALLBACK_LRU_CNTR;
       struct lb_stats *lru_stats = bpf_map_lookup_elem(&stats, &lru_stats_key);
       if (!lru_stats) {
+          bpf_debug("No lru_stats - XDP_DROP\n");
         return XDP_DROP;
       }
       // we weren't able to retrieve per cpu/core lru and falling back to
@@ -445,10 +482,29 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
       // we are going to use it for monitoring.
       lru_stats->v1 += 1;
     }
+    else {
+        bpf_debug("lru_map found for cpu_num=%u\n", cpu_num);
+    }
 
     if (!(pckt.flags & F_SYN_SET) &&
         !(vip_info->flags & F_LRU_BYPASS)) {
       connection_table_lookup(&dst, &pckt, lru_map);
+      if (dst) {
+          bpf_debug("matched in lru_map\n", cpu_num);
+      }
+      else {
+          bpf_debug("NOT matched in lru_map\n", cpu_num);
+      }
+    }
+    else {
+        if (pckt.flags & F_SYN_SET)
+        {
+            bpf_debug("F_SYN_SET - NO lookup in lru_map\n", cpu_num);
+        }
+        if (vip_info->flags & F_LRU_BYPASS)
+        {
+            bpf_debug("F_LRU_BYPASS - NO lookup in lru_map\n", cpu_num);
+        }
     }
     if (!dst) {
       if (pckt.flow.proto == IPPROTO_TCP) {
@@ -456,6 +512,7 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
         struct lb_stats *lru_stats = bpf_map_lookup_elem(
           &stats, &lru_stats_key);
         if (!lru_stats) {
+            bpf_debug("No lru_stats - XDP_DROP\n");
           return XDP_DROP;
         }
         if (pckt.flags & F_SYN_SET) {
@@ -468,17 +525,52 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
           lru_stats->v2 += 1;
         }
       }
-      if(!get_packet_dst(&dst, &pckt, vip_info, is_ipv6, lru_map)) {
+      if(!get_packet_dst(ctx, &dst, &pckt, vip_info, is_ipv6, lru_map)) {
+          bpf_debug("Destination not found - XDP_DROP\n");
         return XDP_DROP;
       }
       // lru misses (either new connection or lru is full and starts to trash)
       data_stats->v2 += 1;
+
+      /* Metadata will be in the perf event before the packet data. */
+      struct S {
+          __u16 cookie;
+          __u16 pkt_len;
+      } __attribute__ ((packed)) metadata;
+
+      /* The XDP perf_event_output handler will use the upper 32 bits
+       * of the flags argument as a number of bytes to include of the
+       * packet payload in the event data. If the size is too big, the
+       * call to bpf_perf_event_output will fail and return -EFAULT.
+       *
+       * See bpf_xdp_event_output in net/core/filter.c.
+       *
+       * The BPF_F_CURRENT_CPU flag means that the event output fd
+       * will be indexed by the CPU number in the event map.
+       */
+      __u64 flags = BPF_F_CURRENT_CPU;
+      __u16 sample_size;
+      int ret;
+
+      metadata.cookie = 0xdead;
+      metadata.pkt_len = 10;
+      sample_size = (metadata.pkt_len < SAMPLE_SIZE ? metadata.pkt_len : SAMPLE_SIZE);
+      flags |= (__u64)sample_size << 32;
+
+      bpf_debug("calling bpf_perf_event_output()\n");
+      ret = bpf_perf_event_output(ctx, &hw_accel_map, flags, &metadata, sizeof(metadata));
+      if (ret)
+          bpf_debug("bpf_perf_event_output() failed: %d\n", ret);
+
     }
   }
+
+  bpf_debug("Destination found: flags=%x, dst=%x\n", (__u32) dst->flags, dst->dst);
 
   cval = bpf_map_lookup_elem(&ctl_array, &mac_addr_pos);
 
   if (!cval) {
+      bpf_debug("Default MAC not found - XDP_DROP\n");
     return XDP_DROP;
   }
 
@@ -488,12 +580,14 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
     }
   } else {
     if(!encap_v4(xdp, cval, &pckt, dst, pkt_bytes)) {
+        bpf_debug("encap_v4 failed - XDP_DROP\n");
       return XDP_DROP;
     }
   }
   vip_num = vip_info->vip_num;
   data_stats = bpf_map_lookup_elem(&stats, &vip_num);
   if (!data_stats) {
+      bpf_debug("No data_stats for VIP - XDP_DROP\n");
     return XDP_DROP;
   }
   data_stats->v1 += 1;
@@ -502,11 +596,13 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
   // per real statistics
   data_stats = bpf_map_lookup_elem(&reals_stats, &pckt.real_index);
   if (!data_stats) {
+      bpf_debug("No data_stats for real - XDP_DROP\n");
     return XDP_DROP;
   }
   data_stats->v1 += 1;
   data_stats->v2 += pkt_bytes;
 
+  bpf_debug("XDP_TX\n\n");
   return XDP_TX;
 }
 
@@ -519,6 +615,8 @@ int balancer_ingress(struct xdp_md *ctx) {
   __u32 nh_off;
   nh_off = sizeof(struct eth_hdr);
 
+  //bpf_debug("Inside balancer_ingress: line %d\n", __LINE__);
+
   if (data + nh_off > data_end) {
     // bogus packet, len less than minimum ethernet frame size
     return XDP_DROP;
@@ -527,9 +625,9 @@ int balancer_ingress(struct xdp_md *ctx) {
   eth_proto = eth->eth_proto;
 
   if (eth_proto == BE_ETH_P_IP) {
-    return process_packet(data, nh_off, data_end, false, ctx);
+    return process_packet(ctx, data, nh_off, data_end, false, ctx);
   } else if (eth_proto == BE_ETH_P_IPV6) {
-    return process_packet(data, nh_off, data_end, true, ctx);
+    return process_packet(ctx, data, nh_off, data_end, true, ctx);
   } else {
     // pass to tcp/ip stack
     return XDP_PASS;
