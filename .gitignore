@@ -1,2 +1,4 @@
 .settings
-
+build
+deps/bpfprog
+katran-server.pid

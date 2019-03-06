@@ -118,8 +118,8 @@ static inline int send_icmp4_too_big(struct xdp_md *xdp) {
   if (bpf_xdp_adjust_head(xdp, 0 - headroom)) {
     return XDP_DROP;
   }
-  void *data = xdp->data;
-  void *data_end = xdp->data_end;
+  void *data = (void*)(uintptr_t)xdp->data;
+  void *data_end = (void*)(uintptr_t)xdp->data_end;
   if (data + (ICMP_TOOBIG_SIZE + headroom) > data_end) {
     return XDP_DROP;
   }
@@ -163,8 +163,8 @@ static inline int send_icmp6_too_big(struct xdp_md *xdp) {
   if (bpf_xdp_adjust_head(xdp, 0 - headroom)) {
     return XDP_DROP;
   }
-  void *data = xdp->data;
-  void *data_end = xdp->data_end;
+  void *data = (void*)(uintptr_t)xdp->data;
+  void *data_end = (void*)(uintptr_t)xdp->data_end;
   if (data + (ICMP6_TOOBIG_SIZE + headroom) > data_end) {
     return XDP_DROP;
   }
@@ -259,6 +259,7 @@ static inline int parse_icmp(void *data, void *data_end, __u64 off,
     return XDP_DROP;
   }
   if (icmp_hdr->type == ICMP_ECHO) {
+      //bpf_debug("%s: sending ICMP reply\n", __func__);
     return send_icmp_reply(data, data_end);
   }
   if (icmp_hdr->type != ICMP_DEST_UNREACH) {

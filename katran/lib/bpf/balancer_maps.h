@@ -37,6 +37,14 @@ struct bpf_map_def SEC("maps") vip_map = {
 };
 
 
+struct bpf_map_def SEC("maps") vip_map_by_id = {
+  .type = BPF_MAP_TYPE_ARRAY,
+  .key_size = sizeof(__u32),
+  .value_size = sizeof(struct vip_meta),
+  .max_entries = MAX_VIPS,
+  .map_flags = NO_FLAGS,
+};
+
 // map which contains cpu core to lru mapping
 struct bpf_map_def SEC("maps") lru_maps_mapping = {
   .type = BPF_MAP_TYPE_ARRAY_OF_MAPS,
@@ -44,6 +52,23 @@ struct bpf_map_def SEC("maps") lru_maps_mapping = {
   .value_size = sizeof(__u32),
   .max_entries = MAX_SUPPORTED_CPUS,
   .map_flags = NO_FLAGS,
+};
+
+// map which contains cpu core to hw acceleration metadata
+struct bpf_map_def SEC("maps") hw_accel_mapping = {
+  .type = BPF_MAP_TYPE_ARRAY_OF_MAPS,
+  .key_size = sizeof(__u32),
+  .value_size = sizeof(__u32),
+  .max_entries = MAX_SUPPORTED_CPUS,
+  .map_flags = NO_FLAGS,
+};
+
+struct bpf_map_def SEC("maps") hw_accel_events = {
+    .type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+    .key_size = sizeof(int),
+    .value_size = sizeof(__u32),
+    .max_entries = MAX_SUPPORTED_CPUS,
+    .map_flags = NO_FLAGS,
 };
 
 // fallback lru. we should never hit this one outside of unittests

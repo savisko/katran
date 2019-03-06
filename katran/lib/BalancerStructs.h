@@ -86,4 +86,18 @@ struct v6_lpm_key {
     uint32_t prefixlen;
     uint32_t addr[4];
 };
+
+struct hw_accel_flow {
+    uint32_t        vip_num;
+    uint32_t        real_key;
+    struct flow_key flow;
+};
+
+struct hw_accel_event {
+    uint32_t real_ip;
+    uint32_t mark_id;
+    uint32_t rx_queue_index;
+    struct flow_key flow;
+} __attribute__ ((packed));
+
 } // namespace katran

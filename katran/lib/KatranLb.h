@@ -504,6 +504,13 @@ class KatranLb {
   void attachLrus();
 
   /**
+   * helper function to attach created HW acceleration maps. must be done after
+   * bpf program is loaded.
+   * throws on failure
+   */
+  void attachHwAccelMaps();
+
+  /**
    * helper function to creat LRU map w/ specified size.
    * returns fd on success, -1 on failure.
    */
@@ -513,11 +520,20 @@ class KatranLb {
       int numaNode = kNoNuma);
 
   /**
+   * helper function to creat HW acceleration map w/ specified size.
+   * returns fd on success, -1 on failure.
+   */
+  int createHwAccelMap(
+      int size = kFallbackLruSize,
+      int flags = kMapNoFlags,
+      int numaNode = kNoNuma);
+
+  /**
    * helper function which do forwarding plane feature discovering
    */
   void featureDiscovering();
 
-  bool createHwAccelMaps();
+  bool createHwAccelEventsMap();
 
   /**
    * helper function to validate that specified string is a valid ip address
@@ -653,6 +669,11 @@ class KatranLb {
    * vector of LRU maps descriptors;
    */
   std::vector<int> lruMapsFd_;
+
+  /**
+   * vector of HW acceleration maps descriptors;
+   */
+  std::vector<int> hwAccelFd_;
 };
 
 } // namespace katran

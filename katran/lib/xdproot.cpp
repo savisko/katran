@@ -65,7 +65,7 @@ int main(int argc, char** argv) {
   // map pinning
   auto root_array = adapter.getMapFdByName("root_array");
   if (root_array < 0) {
-    std::cout << "can't get fd for vip_map\n";
+    std::cout << "can't get fd for root_array\n";
     return 1;
   }
   if (!shared_map_found) {

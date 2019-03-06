@@ -112,5 +112,21 @@ struct address {
   };
 };
 
+struct hw_accel_metadata {
+    __u32 mark_id;
+};
+
+struct hw_accel_flow {
+    __u32           vip_num;
+    __u32           real_key;
+    struct flow_key flow;
+};
+
+struct hw_accel_event {
+    __be32 real_ip;
+    __u32 mark_id;
+    __u32 rx_queue_index;
+    struct flow_key flow;
+} __attribute__ ((packed));
 
 #endif // of _BALANCER_STRUCTS
