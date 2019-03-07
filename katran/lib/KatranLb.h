@@ -62,6 +62,13 @@ constexpr int kMapNumaNode = 4;
 constexpr int kNoNuma = -1;
 
 /**
+ * HW XDP program acceleration related constants
+ */
+constexpr unsigned int XDP_FLAGS_META_SHIFT = 16;
+constexpr unsigned int XDP_DATA_META_MARK = 1;
+constexpr int kHwAccelXdpFlagMark = ((1U << XDP_DATA_META_MARK) << XDP_FLAGS_META_SHIFT);
+
+/**
  * This class implements all routines to interact with katran load balancer
  */
 class KatranLb {

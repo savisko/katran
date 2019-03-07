@@ -10,14 +10,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define bpf_debug(fmt, ...) \
-({ \
-char ____fmt[] = fmt; \
-bpf_trace_printk(____fmt, sizeof(____fmt), \
-##__VA_ARGS__); \
-})
-
-
 #include "balancer_consts.h"
 #include "balancer_structs.h"
 #include "balancer_maps.h"
@@ -28,9 +20,24 @@ bpf_trace_printk(____fmt, sizeof(____fmt), \
 #include "pckt_parsing.h"
 #include "handle_icmp.h"
 
+#define BPF_DEBUG_ENABLE
 
-#define SAMPLE_SIZE 64ul
-#define MAX_CPUS 128
+
+#ifdef HW_ACCELERATION_ENABLED
+#ifdef BPF_DEBUG_ENABLE
+#define bpf_debug(fmt, ...) \
+({ \
+char ____fmt[] = fmt; \
+bpf_trace_printk(____fmt, sizeof(____fmt), \
+##__VA_ARGS__); \
+})
+#else
+#define bpf_debug(fmt, ...)
+#endif
+#else
+#define bpf_debug(fmt, ...)
+#endif
+
 
 __attribute__((__always_inline__))
 static inline __u32 get_packet_hash(struct packet_description *pckt,
@@ -70,9 +77,8 @@ static inline bool is_under_flood(__u64 *cur_time) {
   return false;
 }
 
-__attribute__((__noinline__))
-static bool get_packet_dst(struct xdp_md *ctx,
-                           struct real_definition **real,
+__attribute__((__always_inline__))
+static inline bool get_packet_dst(struct real_definition **real,
                                   struct packet_description *pckt,
                                   struct vip_meta *vip_info,
                                   bool is_ipv6,
@@ -132,24 +138,15 @@ static bool get_packet_dst(struct xdp_md *ctx,
     hash = get_packet_hash(pckt, hash_16bytes) % RING_SIZE;
     key = RING_SIZE * (vip_info->vip_num) + hash;
 
-    bpf_debug("vip_num=%u\n", vip_info->vip_num);
-    bpf_debug("RING_SIZE=%u, key=%u\n", RING_SIZE, key);
-
     real_pos = bpf_map_lookup_elem(&ch_rings, &key);
     if(!real_pos) {
-        bpf_debug("real_pos - not found\n");
       return false;
     }
     key = *real_pos;
-    bpf_debug("real key=%u\n", key);
-  }
-  else {
-      bpf_debug("src_found\n");
   }
   pckt->real_index = key;
   *real = bpf_map_lookup_elem(&reals, &key);
   if (!(*real)) {
-      bpf_debug("real server not found\n");
     return false;
   }
   if (!(vip_info->flags & F_LRU_BYPASS) && !under_flood) {
@@ -157,7 +154,6 @@ static bool get_packet_dst(struct xdp_md *ctx,
       new_dst_lru.atime = cur_time;
     }
     new_dst_lru.pos = key;
-    bpf_debug("calling bpf_map_update_elem()\n");
     bpf_map_update_elem(lru_map, &pckt->flow, &new_dst_lru, BPF_ANY);
   }
   return true;
@@ -312,6 +308,7 @@ static inline int process_encaped_pckt(void **data, void **data_end,
   return FURTHER_PROCESSING;
 }
 
+#ifdef HW_ACCELERATION_ENABLED
 static inline __attribute__((__always_inline__))
 __u32 allocate_hw_mark_id(__u32 cpu_num)
 {
@@ -329,27 +326,35 @@ void deallocate_hw_mark_id(__u32 cpu_num, __u32 mark_id)
 struct xdp_md_mark {
     __u32 mark;
 } __attribute__((aligned(4)));
+#endif /* HW_ACCELERATION_ENABLED */
 
 __attribute__((__always_inline__))
+#ifdef HW_ACCELERATION_ENABLED
 static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void *data_end,
                                  bool is_ipv6, struct xdp_md *xdp) {
+#else
+static inline int process_packet(void *data, __u64 off, void *data_end,
+                                 bool is_ipv6, struct xdp_md *xdp) {
+#endif
 
-  struct ctl_value *cval = NULL;
+  struct ctl_value *cval;
   struct real_definition *dst = NULL;
   struct packet_description pckt = {};
   struct vip_definition vip = {};
-  struct vip_meta *vip_info = NULL;
-  struct lb_stats *data_stats = NULL;
+  struct vip_meta *vip_info;
+  struct lb_stats *data_stats;
   __u64 iph_len;
   __u8 protocol;
+#ifdef HW_ACCELERATION_ENABLED
   int hw_accel_supported = 0, lru_map_updated = 0, bypass_vip_lookup = 0;
+#endif
 
   int action;
   __u32 vip_num;
   __u32 mac_addr_pos = 0;
   __u16 pkt_bytes;
-  size_t data_len;
 
+#ifdef HW_ACCELERATION_ENABLED
   struct xdp_md_mark *mark_ptr = (struct xdp_md_mark *)(uintptr_t)xdp->data_meta;
   if (mark_ptr + 1 <= data) {
       __u32 cpu_num, mark_id;
@@ -362,7 +367,7 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
           mark_id = mark_ptr->mark;
           if (mark_id != 0) {
               struct hw_accel_flow *hw_flow;
-              //bpf_debug("Received marked packet - mark_id %u\n", mark_id);
+              bpf_debug("Received marked packet - mark_id %u\n", mark_id);
               hw_flow = bpf_map_lookup_elem(hw_accel_map, &mark_id);
               if (hw_flow) {
                   vip_num = hw_flow->vip_num;
@@ -397,90 +402,94 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
           bpf_debug("HW acceleration map not found for CPU %u\n", cpu_num);
       }
   }
+  else {
+      //bpf_debug("HW mark metadata not provided\n");
+  }
+#endif /* HW_ACCELERATION_ENABLED */
 
+#ifdef HW_ACCELERATION_ENABLED
   if (!bypass_vip_lookup) {
-      action = process_l3_headers(
-        &pckt, &protocol, off, &pkt_bytes, data, data_end, is_ipv6);
-      if (action >= 0) {
-        return action;
+#endif
+  action = process_l3_headers(
+    &pckt, &protocol, off, &pkt_bytes, data, data_end, is_ipv6);
+  if (action >= 0) {
+    return action;
+  }
+  protocol = pckt.flow.proto;
+
+  #ifdef INLINE_DECAP
+  if (protocol == IPPROTO_IPIP || protocol == IPPROTO_IPV6) {
+    struct address dst_addr = {};
+    if (is_ipv6) {
+      memcpy(dst_addr.addrv6, pckt.flow.dstv6, 16);
+    } else {
+      dst_addr.addr = pckt.flow.dst;
+    }
+    __u32 *decap_dst_flags = bpf_map_lookup_elem(&decap_dst, &dst_addr);
+
+    action = process_encaped_pckt(&data, &data_end, xdp, &is_ipv6, &pckt,
+                                  &protocol, off, &pkt_bytes);
+    if (action >= 0) {
+      return action;
+    }
+
+    if (decap_dst_flags) {
+      __u32 stats_key = MAX_VIPS + REMOTE_ENCAP_CNTRS;
+      data_stats = bpf_map_lookup_elem(&stats, &stats_key);
+      if (!data_stats) {
+        return XDP_DROP;
       }
-      protocol = pckt.flow.proto;
+      data_stats->v1 += 1;
+      pckt.flags |= F_INLINE_DECAP;
+    } else {
+      // it's ipip encapsulated packet but not to decap dst. so just pass
+      // decapsulated packet to the kernel
+      return XDP_PASS;
+    }
+  }
+  #endif
 
-      #ifdef INLINE_DECAP
-      if (protocol == IPPROTO_IPIP || protocol == IPPROTO_IPV6) {
-        struct address dst_addr = {};
-        if (is_ipv6) {
-          memcpy(dst_addr.addrv6, pckt.flow.dstv6, 16);
-        } else {
-          dst_addr.addr = pckt.flow.dst;
-        }
-        __u32 *decap_dst_flags = bpf_map_lookup_elem(&decap_dst, &dst_addr);
-
-        action = process_encaped_pckt(&data, &data_end, xdp, &is_ipv6, &pckt,
-                                      &protocol, off, &pkt_bytes);
-        if (action >= 0) {
-          return action;
-        }
-
-        if (decap_dst_flags) {
-          __u32 stats_key = MAX_VIPS + REMOTE_ENCAP_CNTRS;
-          data_stats = bpf_map_lookup_elem(&stats, &stats_key);
-          if (!data_stats) {
-            return XDP_DROP;
-          }
-          data_stats->v1 += 1;
-          pckt.flags |= F_INLINE_DECAP;
-        } else {
-          // it's ipip encapsulated packet but not to decap dst. so just pass
-          // decapsulated packet to the kernel
-          return XDP_PASS;
-        }
-      }
-      #endif
-
-      if (protocol == IPPROTO_TCP) {
-        if (!parse_tcp(data, data_end, is_ipv6, &pckt)) {
-          return XDP_DROP;
-        }
-      } else if (protocol == IPPROTO_UDP) {
-        if (!parse_udp(data, data_end, is_ipv6, &pckt)) {
-          return XDP_DROP;
-        }
-      } else {
-        // send to tcp/ip stack
-        return XDP_PASS;
-      }
-
-      if (is_ipv6) {
-        memcpy(vip.vipv6, pckt.flow.dstv6, 16);
-      } else {
-        vip.vip = pckt.flow.dst;
-      }
-
-      vip.port = pckt.flow.port16[1];
-      vip.proto = pckt.flow.proto;
-      vip_info = bpf_map_lookup_elem(&vip_map, &vip);
-      if (!vip_info) {
-        vip.port = 0;
-        vip_info = bpf_map_lookup_elem(&vip_map, &vip);
-        if (!vip_info) {
-          //bpf_debug("VIP not found - XDP_PASS\n");
-          return XDP_PASS;
-        }
-
-        if (!(vip_info->flags & F_HASH_DPORT_ONLY)) {
-          // VIP, which doesnt care about dst port (all packets to this VIP w/ diff
-          // dst port but from the same src port/ip must go to the same real
-          pckt.flow.port16[1] = 0;
-        }
-      }
-      //bpf_debug("\n");
-      bpf_debug("VIP found\n");
+  if (protocol == IPPROTO_TCP) {
+    if (!parse_tcp(data, data_end, is_ipv6, &pckt)) {
+      return XDP_DROP;
+    }
+  } else if (protocol == IPPROTO_UDP) {
+    if (!parse_udp(data, data_end, is_ipv6, &pckt)) {
+      return XDP_DROP;
+    }
+  } else {
+    // send to tcp/ip stack
+    return XDP_PASS;
   }
 
-  data_len = data_end - data;
+  if (is_ipv6) {
+    memcpy(vip.vipv6, pckt.flow.dstv6, 16);
+  } else {
+    vip.vip = pckt.flow.dst;
+  }
 
-  if (data_len > MAX_PCKT_SIZE) {
+  vip.port = pckt.flow.port16[1];
+  vip.proto = pckt.flow.proto;
+  vip_info = bpf_map_lookup_elem(&vip_map, &vip);
+  if (!vip_info) {
+    vip.port = 0;
+    vip_info = bpf_map_lookup_elem(&vip_map, &vip);
+    if (!vip_info) {
+      return XDP_PASS;
+    }
+
+    if (!(vip_info->flags & F_HASH_DPORT_ONLY)) {
+      // VIP, which doesnt care about dst port (all packets to this VIP w/ diff
+      // dst port but from the same src port/ip must go to the same real
+      pckt.flow.port16[1] = 0;
+    }
+  }
+  bpf_debug("VIP found\n");
+#ifdef HW_ACCELERATION_ENABLED
+  }
+#endif
+
+  if (data_end - data > MAX_PCKT_SIZE) {
 #ifdef ICMP_TOOBIG_GENERATION
     __u32 stats_key = MAX_VIPS + ICMP_TOOBIG_CNTRS;
     data_stats = bpf_map_lookup_elem(&stats, &stats_key);
@@ -494,18 +503,14 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
     }
     return send_icmp_too_big(xdp, is_ipv6, data_end - data);
 #else
-    //bpf_debug("data length %lu is bigger than MAX_PCKT_SIZE=%d - XDP_DROP\n", data_len, MAX_PCKT_SIZE);
     return XDP_DROP;
 #endif
   }
 
+  __u32 stats_key = MAX_VIPS + LRU_CNTRS;
+  data_stats = bpf_map_lookup_elem(&stats, &stats_key);
   if (!data_stats) {
-      __u32 stats_key = MAX_VIPS + LRU_CNTRS;
-      data_stats = bpf_map_lookup_elem(&stats, &stats_key);
-      if (!data_stats) {
-          //bpf_debug("No stats - XDP_DROP\n");
-        return XDP_DROP;
-      }
+    return XDP_DROP;
   }
 
   // totall packets
@@ -522,7 +527,6 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
         pckt.real_index = key;
         dst = bpf_map_lookup_elem(&reals, &key);
         if (!dst) {
-            //bpf_debug("F_QUIC_VIP - XDP_DROP\n");
           return XDP_DROP;
         }
       }
@@ -538,12 +542,10 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
     __u32 cpu_num = bpf_get_smp_processor_id();
     void *lru_map = bpf_map_lookup_elem(&lru_maps_mapping, &cpu_num);
     if (!lru_map) {
-        //bpf_debug("lru_map NOT found for cpu_num=%u\n", cpu_num);
       lru_map = &fallback_lru_cache;
       __u32 lru_stats_key = MAX_VIPS + FALLBACK_LRU_CNTR;
       struct lb_stats *lru_stats = bpf_map_lookup_elem(&stats, &lru_stats_key);
       if (!lru_stats) {
-          //bpf_debug("No lru_stats - XDP_DROP\n");
         return XDP_DROP;
       }
       // we weren't able to retrieve per cpu/core lru and falling back to
@@ -555,13 +557,16 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
     if (!(pckt.flags & F_SYN_SET) &&
         !(vip_info->flags & F_LRU_BYPASS)) {
       connection_table_lookup(&dst, &pckt, lru_map);
+#ifdef HW_ACCELERATION_ENABLED
       if (dst) {
           bpf_debug("lru_map match\n", cpu_num);
       }
       else {
           bpf_debug("lru_map miss\n", cpu_num);
       }
+#endif
     }
+#ifdef HW_ACCELERATION_ENABLED
     else {
         if (pckt.flags & F_SYN_SET)
         {
@@ -572,13 +577,13 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
             bpf_debug("F_LRU_BYPASS\n", cpu_num);
         }
     }
+#endif
     if (!dst) {
       if (pckt.flow.proto == IPPROTO_TCP) {
         __u32 lru_stats_key = MAX_VIPS + LRU_MISS_CNTR;
         struct lb_stats *lru_stats = bpf_map_lookup_elem(
           &stats, &lru_stats_key);
         if (!lru_stats) {
-            //bpf_debug("No lru_stats - XDP_DROP\n");
           return XDP_DROP;
         }
         if (pckt.flags & F_SYN_SET) {
@@ -591,14 +596,14 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
           lru_stats->v2 += 1;
         }
       }
-      if(!get_packet_dst(ctx, &dst, &pckt, vip_info, is_ipv6, lru_map)) {
-          //bpf_debug("Destination not found - XDP_DROP\n");
+      if(!get_packet_dst(&dst, &pckt, vip_info, is_ipv6, lru_map)) {
         return XDP_DROP;
       }
       // lru misses (either new connection or lru is full and starts to trash)
       data_stats->v2 += 1;
-
+#ifdef HW_ACCELERATION_ENABLED
       lru_map_updated = 1;
+#endif
     }
   }
 
@@ -607,7 +612,6 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
   cval = bpf_map_lookup_elem(&ctl_array, &mac_addr_pos);
 
   if (!cval) {
-      //bpf_debug("Default MAC not found - XDP_DROP\n");
     return XDP_DROP;
   }
 
@@ -617,14 +621,12 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
     }
   } else {
     if(!encap_v4(xdp, cval, &pckt, dst, pkt_bytes)) {
-        //bpf_debug("encap_v4 failed - XDP_DROP\n");
       return XDP_DROP;
     }
   }
   vip_num = vip_info->vip_num;
   data_stats = bpf_map_lookup_elem(&stats, &vip_num);
   if (!data_stats) {
-      //bpf_debug("No data_stats for VIP - XDP_DROP\n");
     return XDP_DROP;
   }
   data_stats->v1 += 1;
@@ -633,13 +635,13 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
   // per real statistics
   data_stats = bpf_map_lookup_elem(&reals_stats, &pckt.real_index);
   if (!data_stats) {
-      //bpf_debug("No data_stats for real - XDP_DROP\n");
     return XDP_DROP;
   }
   data_stats->v1 += 1;
   data_stats->v2 += pkt_bytes;
 
-  if (/*hw_accel_supported &&*/ lru_map_updated) {
+#ifdef HW_ACCELERATION_ENABLED
+  if (lru_map_updated && hw_accel_supported) {
       bpf_debug("lru_map_updated=1\n");
       if (!is_ipv6 && !(vip_info->flags & F_LRU_BYPASS) && !(vip_info->flags & F_QUIC_VIP) && !(pckt.flags & F_INLINE_DECAP)) {
           __u32 cpu_num, mark_id;
@@ -707,8 +709,9 @@ static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void
           }
       }
   }
-
   bpf_debug("XDP_TX\n\n");
+#endif /* HW_ACCELERATION_ENABLED */
+
   return XDP_TX;
 }
 
@@ -722,8 +725,6 @@ int balancer_ingress(struct xdp_md *ctx) {
   bool is_ipv6;
   nh_off = sizeof(struct eth_hdr);
 
-  //bpf_debug("Inside balancer_ingress: line %d\n", __LINE__);
-
   if (data + nh_off > data_end) {
     // bogus packet, len less than minimum ethernet frame size
     return XDP_DROP;
@@ -733,15 +734,17 @@ int balancer_ingress(struct xdp_md *ctx) {
 
   if (eth_proto == BE_ETH_P_IP) {
       is_ipv6 = false;
-    //return process_packet(ctx, data, nh_off, data_end, false, ctx);
   } else if (eth_proto == BE_ETH_P_IPV6) {
       is_ipv6 = true;
-    //return process_packet(ctx, data, nh_off, data_end, true, ctx);
   } else {
     // pass to tcp/ip stack
     return XDP_PASS;
   }
+#ifdef HW_ACCELERATION_ENABLED
   return process_packet(ctx, data, nh_off, data_end, is_ipv6, ctx);
+#else
+  return process_packet(data, nh_off, data_end, is_ipv6, ctx);
+#endif
 }
 
 char _license[] SEC("license") = "GPL";

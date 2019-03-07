@@ -22,7 +22,7 @@ PID_FILE=katran-server.pid
 BALANCER_PROG="deps/bpfprog/bpf/balancer_kern.o"
 HEALTHCHECKER_PROG="deps/bpfprog/bpf/healthchecking_ipip.o"
 #FORWARDING_CPU_CORES="8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31"
-FORWARDING_CPU_CORES="0"
+FORWARDING_CPU_CORES="0,1,2,3"
 
 #if [ -s $PID_FILE ]; then
 #	echo "Seems katran server is running already. Remove/nulify $PID_FILE if not."

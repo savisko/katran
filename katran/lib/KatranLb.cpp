@@ -20,7 +20,6 @@
 #include <algorithm>
 #include <iterator>
 #include <stdexcept>
-#include <iostream>
 
 #include <folly/Format.h>
 #include <folly/lang/Bits.h>
@@ -109,6 +108,8 @@ KatranLb::KatranLb(const KatranConfig& config)
     }
     ctl.ifindex = res;
     ctlValues_[kMainIntfPos] = ctl;
+
+    LOG(INFO) << "HW XDP program acceleration " << (config_.enableHwAccel ? "enabled" : "disabled");
   }
 }
 
@@ -159,16 +160,15 @@ void KatranLb::initialSanityChecking() {
   int res;
 
   std::vector<std::string> maps = {"vip_map",
-                                   "vip_map_by_id",
                                    "ch_rings",
                                    "reals",
                                    "stats",
                                    "ctl_array",
                                    "lru_maps_mapping",
-                                   "quic_mapping",
-                                   "hw_accel_mapping",
-                                   "hw_accel_events",
-                                   };
+                                   "quic_mapping"};
+  std::vector<std::string> hw_accel_maps = {"vip_map_by_id",
+                                            "hw_accel_mapping",
+                                            "hw_accel_events"};
 
   res = getKatranProgFd();
   if (res < 0) {
@@ -192,6 +192,16 @@ void KatranLb::initialSanityChecking() {
     if (res < 0) {
       VLOG(4) << "missing map: " << map;
       throw std::invalid_argument("map not found");
+    }
+  }
+
+  if (config_.enableHwAccel) {
+    for (auto& map : hw_accel_maps) {
+      res = bpfAdapter_.getMapFdByName(map);
+      if (res < 0) {
+        VLOG(4) << "missing map: " << map;
+        throw std::invalid_argument("map not found");
+      }
     }
   }
 }
@@ -220,7 +230,7 @@ void KatranLb::initLrus() {
   bool forwarding_cores_specified{false};
   bool numa_mapping_specified{false};
   int lru_map_flags = 0;
-  int lru_proto_fd, hw_accel_proto_fd;
+  int lru_proto_fd, hw_accel_proto_fd = -1;
   int res;
   if (forwardingCores_.size() != 0) {
     if (numaNodes_.size() != 0) {
@@ -253,12 +263,14 @@ void KatranLb::initLrus() {
         throw std::runtime_error("cant create LRU for forwarding core");
       }
       lruMapsFd_[core] = lru_fd;
-      hw_accel_fd = createHwAccelMap(per_core_lru_size, lru_map_flags, numa_node);
-      if (hw_accel_fd < 0) {
-        LOG(FATAL) << "can't creat HW acceleration map for core: " << core;
-        throw std::runtime_error("cant create HW acceleration map for forwarding core");
+      if (config_.enableHwAccel) {
+        hw_accel_fd = createHwAccelMap(per_core_lru_size, lru_map_flags, numa_node);
+        if (hw_accel_fd < 0) {
+          LOG(FATAL) << "can't creat HW acceleration map for core: " << core;
+          throw std::runtime_error("cant create HW acceleration map for forwarding core");
+        }
+        hwAccelFd_[core] = hw_accel_fd;
       }
-      hwAccelFd_[core] = hw_accel_fd;
     }
     forwarding_cores_specified = true;
   }
@@ -269,7 +281,9 @@ void KatranLb::initLrus() {
     // we are going to use the first one as a key to find fd of
     // already created LRU
     lru_proto_fd = lruMapsFd_[forwardingCores_[kFirstElem]];
-    hw_accel_proto_fd = hwAccelFd_[forwardingCores_[kFirstElem]];
+    if (config_.enableHwAccel) {
+      hw_accel_proto_fd = hwAccelFd_[forwardingCores_[kFirstElem]];
+    }
   } else {
     // creating prototype for LRU's map-in-map. this code path would be hit
     // only during unit tests, where we dont specify forwarding cores
@@ -277,10 +291,11 @@ void KatranLb::initLrus() {
     if (lru_proto_fd < 0) {
       throw std::runtime_error("can't create prototype map for test lru");
     }
-
-    hw_accel_proto_fd = createHwAccelMap();
-    if (hw_accel_proto_fd < 0) {
-      throw std::runtime_error("can't create prototype map for test lru");
+    if (config_.enableHwAccel) {
+      hw_accel_proto_fd = createHwAccelMap();
+      if (hw_accel_proto_fd < 0) {
+        throw std::runtime_error("can't create prototype map for test lru");
+      }
     }
   }
   res = bpfAdapter_.setInnerMapPrototype("lru_maps_mapping", lru_proto_fd);
@@ -288,10 +303,12 @@ void KatranLb::initLrus() {
     throw std::runtime_error(
         "can't update inner_maps_fds w/ prototype for main lru");
   }
-  res = bpfAdapter_.setInnerMapPrototype("hw_accel_mapping", hw_accel_proto_fd);
-  if (res < 0) {
-    throw std::runtime_error(
-        "can't update inner_maps_fds w/ prototype for main HW acceleration map");
+  if (config_.enableHwAccel) {
+    res = bpfAdapter_.setInnerMapPrototype("hw_accel_mapping", hw_accel_proto_fd);
+    if (res < 0) {
+      throw std::runtime_error(
+          "can't update inner_maps_fds w/ prototype for main HW acceleration map");
+    }
   }
 }
 
@@ -369,8 +386,10 @@ void KatranLb::loadBpfProgs() {
   initialSanityChecking();
   featureDiscovering();
 
-  if (!createHwAccelEventsMap()) {
+  if (config_.enableHwAccel) {
+    if (!createHwAccelEventsMap()) {
       throw std::invalid_argument("can't create HW acceleration maps");
+    }
   }
 
   // add values to main prog ctl_array
@@ -403,7 +422,8 @@ void KatranLb::loadBpfProgs() {
   }
   progsLoaded_ = true;
   attachLrus();
-  attachHwAccelMaps();
+  if (config_.enableHwAccel)
+    attachHwAccelMaps();
 }
 
 void KatranLb::attachBpfProgs() {
@@ -412,21 +432,19 @@ void KatranLb::attachBpfProgs() {
   }
   int res;
   auto main_fd = bpfAdapter_.getProgFdByName("xdp-balancer");
-  std::cout << "main_fd=" << main_fd << std::endl;
   auto interface_index = ctlValues_[kMainIntfPos].ifindex;
-  std::cout << "interface_index=" << interface_index << std::endl;
-  std::cout << "config_.mainInterface=" << config_.mainInterface << std::endl;
   if (standalone_) {
-      std::cout << "attaching main bpf prog in standalone mode" << std::endl;
+      int xdp_flags = 0;
+      if (config_.enableHwAccel)
+          xdp_flags |= kHwAccelXdpFlagMark;
     // attaching main bpf prog in standalone mode
-    res = bpfAdapter_.modifyXdpProg(main_fd, interface_index);
+    res = bpfAdapter_.modifyXdpProg(main_fd, interface_index, xdp_flags);
     if (res != 0) {
       throw std::invalid_argument(
           "can't attach main bpf prog "
           "to main inteface");
     }
   } else {
-      std::cout << "we are in \"shared\" mode and must register ourself in root xdp prog" << std::endl;
     // we are in "shared" mode and must register ourself in root xdp prog
     rootMapFd_ = bpfAdapter_.getPinnedBpfObject(config_.rootMapPath);
     if (rootMapFd_ < 0) {
@@ -439,7 +457,6 @@ void KatranLb::attachBpfProgs() {
   }
 
   if (config_.enableHc) {
-      std::cout << "attaching healthchecking bpf prog." << std::endl;
     // attaching healthchecking bpf prog.
     auto hc_fd = getHealthcheckerProgFd();
     res = bpfAdapter_.addTcBpfFilter(
@@ -1212,26 +1229,32 @@ bool KatranLb::updateVipMap(
       LOG(INFO) << "can't add new element into vip_map";
       return false;
     }
-    res = bpfAdapter_.bpfUpdateMap(
-            bpfAdapter_.getMapFdByName("vip_map_by_id"), &meta->vip_num, meta);
+    if (config_.enableHwAccel) {
+      res = bpfAdapter_.bpfUpdateMap(
+              bpfAdapter_.getMapFdByName("vip_map_by_id"), &meta->vip_num, meta);
+    }
   } else {
     vip_meta vip_meta;
     auto vip_map_fd = bpfAdapter_.getMapFdByName("vip_map");
-    auto res = bpfAdapter_.bpfMapLookupElement(vip_map_fd, &vip_def, &vip_meta);
-    if (res != 0) {
+    if (config_.enableHwAccel) {
+      auto res = bpfAdapter_.bpfMapLookupElement(vip_map_fd, &vip_def, &vip_meta);
+      if (res != 0) {
         LOG(INFO) << "can't delete element from vip_map - not found";
         return false;
+      }
     }
-    res = bpfAdapter_.bpfMapDeleteElement(vip_map_fd, &vip_def);
+    auto res = bpfAdapter_.bpfMapDeleteElement(vip_map_fd, &vip_def);
     if (res != 0) {
       LOG(INFO) << "can't delete element from vip_map";
       return false;
     }
-    res = bpfAdapter_.bpfMapDeleteElement(
+    if (config_.enableHwAccel) {
+      auto res = bpfAdapter_.bpfMapDeleteElement(
         bpfAdapter_.getMapFdByName("vip_map_by_id"), &vip_meta.vip_num);
-    if (res != 0) {
-      LOG(INFO) << "can't delete element from vip_map_by_id";
-      return false;
+      if (res != 0) {
+        LOG(INFO) << "can't delete element from vip_map_by_id";
+        return false;
+      }
     }
   }
   return true;

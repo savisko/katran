@@ -50,6 +50,8 @@ var (
 		"sleep timeout before removing xdp prog on shutdown")
 	enableHc = flag.Bool(
 		"enable_hc", false, "Enable healthchecking bpf prog")
+	enableHwAccel = flag.Bool(
+		"enable_hw_accel", true, "Enable HW XDP program acceleration")
 	run = flag.Bool(
 		"run", false, "should we run")
 	shouldAffinitize = flag.Bool(
@@ -73,12 +75,13 @@ func prepareKatranArgs() string {
 	topology := topology_parser.GetCpuTopology()
 	numa_nodes := topology.GetNumaListForCpus(forwarding_cpus)
 	args := fmt.Sprintf(
-		("-balancer_prog=%s -intf=%s -hc_forwarding=%t -map_path=%s" +
+		("-balancer_prog=%s -intf=%s -hc_forwarding=%t -hw_accel=%t -map_path=%s" +
 			" -prog_pos=%d -ipip_intf=%s -ipip6_intf=%s -priority=%d" +
 			" -lru_size=%d -shutdown_delay=%d"),
 		*balancerProg,
 		*intf,
 		*enableHc,
+		*enableHwAccel,
 		*mapPath,
 		*progPos,
 		*ipipIntf,

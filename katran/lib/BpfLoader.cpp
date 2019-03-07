@@ -17,8 +17,6 @@
 
 #include "BpfLoader.h"
 
-#include <iostream>
-
 #include <glog/logging.h>
 
 /* BEGIN: From libbpf */
@@ -124,7 +122,6 @@ int BpfLoader::loadBpfFile(
     const bpf_prog_type type,
     bool use_names) {
   auto obj = ::bpf_object__open(path.c_str());
-  std::cout << "::bpf_object__open(" << path << ") => " << (void*) obj << std::endl;
   if (obj == nullptr) {
     return kError;
   }

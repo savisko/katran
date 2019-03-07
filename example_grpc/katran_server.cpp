@@ -55,6 +55,7 @@ DEFINE_string(map_path, "", "path to pinned map from root xdp prog."
   " default path forces to work in standalone mode");
 DEFINE_int32(prog_pos, 2, "katran's position inside root xdp array");
 DEFINE_bool(hc_forwarding, true, "turn on forwarding path for healthchecks");
+DEFINE_bool(hw_accel, true, "enable HW XDP program acceleration");
 DEFINE_int32(shutdown_delay, 10000, "shutdown delay in milliseconds");
 DEFINE_int64(lru_size, 8000000, "size of LRU table");
 DEFINE_string(forwarding_cores, "", "coma separed list of forwarding cores");
@@ -124,6 +125,7 @@ int main(int argc, char** argv) {
     .rootMapPath = FLAGS_map_path,
     .rootMapPos = static_cast<uint32_t>(FLAGS_prog_pos),
     .enableHc = FLAGS_hc_forwarding,
+    .enableHwAccel = FLAGS_hw_accel,
   };
   config.LruSize = static_cast<uint64_t>(FLAGS_lru_size);
   config.forwardingCores = forwardingCores;

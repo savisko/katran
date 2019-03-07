@@ -112,10 +112,7 @@ struct address {
   };
 };
 
-struct hw_accel_metadata {
-    __u32 mark_id;
-};
-
+#ifdef HW_ACCELERATION_ENABLED
 struct hw_accel_flow {
     __u32           vip_num;
     __u32           real_key;
@@ -128,5 +125,6 @@ struct hw_accel_event {
     __u32 rx_queue_index;
     struct flow_key flow;
 } __attribute__ ((packed));
+#endif // HW_ACCELERATION_ENABLED
 
 #endif // of _BALANCER_STRUCTS
