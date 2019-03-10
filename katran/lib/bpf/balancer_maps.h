@@ -36,16 +36,6 @@ struct bpf_map_def SEC("maps") vip_map = {
   .map_flags = NO_FLAGS,
 };
 
-#ifdef HW_ACCELERATION_ENABLED
-struct bpf_map_def SEC("maps") vip_map_by_id = {
-  .type = BPF_MAP_TYPE_ARRAY,
-  .key_size = sizeof(__u32),
-  .value_size = sizeof(struct vip_meta),
-  .max_entries = MAX_VIPS,
-  .map_flags = NO_FLAGS,
-};
-#endif // HW_ACCELERATION_ENABLED
-
 // map which contains cpu core to lru mapping
 struct bpf_map_def SEC("maps") lru_maps_mapping = {
   .type = BPF_MAP_TYPE_ARRAY_OF_MAPS,
@@ -56,11 +46,36 @@ struct bpf_map_def SEC("maps") lru_maps_mapping = {
 };
 
 #ifdef HW_ACCELERATION_ENABLED
+struct bpf_map_def SEC("maps") vip_map_by_id = {
+  .type = BPF_MAP_TYPE_ARRAY,
+  .key_size = sizeof(__u32),
+  .value_size = sizeof(struct vip_meta),
+  .max_entries = MAX_VIPS,
+  .map_flags = NO_FLAGS,
+};
+
 // map which contains cpu core to hw acceleration metadata
 struct bpf_map_def SEC("maps") hw_accel_mapping = {
   .type = BPF_MAP_TYPE_ARRAY_OF_MAPS,
   .key_size = sizeof(__u32),
   .value_size = sizeof(__u32),
+  .max_entries = MAX_SUPPORTED_CPUS,
+  .map_flags = NO_FLAGS,
+};
+
+struct bpf_map_def SEC("maps") hw_accel_mapping2 = {
+  .type = BPF_MAP_TYPE_ARRAY_OF_MAPS,
+  .key_size = sizeof(__u32),
+  .value_size = sizeof(__u32),
+  .max_entries = MAX_SUPPORTED_CPUS,
+  .map_flags = NO_FLAGS,
+};
+
+// map which contains cpu core to markID pools
+struct bpf_map_def SEC("maps") markid_pool_mapping = {
+  .type = BPF_MAP_TYPE_ARRAY,
+  .key_size = sizeof(__u32),
+  .value_size = sizeof(struct hw_accel_markid_pool),
   .max_entries = MAX_SUPPORTED_CPUS,
   .map_flags = NO_FLAGS,
 };

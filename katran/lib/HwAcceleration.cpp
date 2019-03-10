@@ -149,8 +149,10 @@ static int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **heade
     unsigned int i;
 
     pfds = reinterpret_cast<struct pollfd*>(calloc(num_fds, sizeof(*pfds)));
-    if (!pfds)
+    if (!pfds) {
+        LOG(ERROR) << "Failed to allocate memory";
         return LIBBPF_PERF_EVENT_ERROR;
+    }
 
     for (i = 0; i < num_fds; i++) {
         pfds[i].fd = fds[i];
@@ -158,7 +160,14 @@ static int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **heade
     }
 
     for (;;) {
-        poll(pfds, num_fds, 1000);
+        int res = poll(pfds, num_fds, 1000);
+        if (res == 0)
+            continue;
+        if (res < 0) {
+            int error_code = errno;
+            LOG(ERROR) << "poll() returned " << res << ": " << strerror(error_code);
+            break;
+        }
         for (i = 0; i < num_fds; i++) {
             if (!pfds[i].revents)
                 continue;
@@ -170,8 +179,10 @@ static int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **heade
                              page_size, &buf, &len,
                              &bpf_perf_event_print,
                              reinterpret_cast<void*>(output_fn));
-            if (ret != LIBBPF_PERF_EVENT_CONT)
+            if (ret != LIBBPF_PERF_EVENT_CONT) {
+                LOG(ERROR) << "bpf_perf_event_read_simple() returned " << ret;
                 break;
+            }
         }
     }
 
@@ -240,8 +251,10 @@ bool startHwAccelerationThread(int bpf_map_fd)
 {
     numcpus = get_nprocs();
 
-    if (numcpus <= 0)
+    if (numcpus <= 0) {
+        LOG(ERROR) << "Invalid number of available processors: " << numcpus;
         return false;
+    }
 
     if (numcpus > MAX_CPUS)
         numcpus = MAX_CPUS;

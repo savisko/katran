@@ -100,4 +100,10 @@ struct hw_accel_event {
     struct flow_key flow;
 } __attribute__ ((packed));
 
+struct hw_accel_markid_pool {
+    uint32_t   range_start;
+    uint32_t   range_end;
+    uint32_t   current_id;
+};
+
 } // namespace katran

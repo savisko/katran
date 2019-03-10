@@ -37,6 +37,7 @@ constexpr int kMaxForwardingCores = 128;
 constexpr int kFirstElem = 0;
 constexpr int kError = -1;
 constexpr uint32_t kMaxQuicId = 65535; // 2^16-1
+constexpr uint32_t kMaxHwMarkIds = 0x01000000;
 } // namespace
 
 KatranLb::KatranLb(const KatranConfig& config)
@@ -48,7 +49,8 @@ KatranLb::KatranLb(const KatranConfig& config)
       forwardingCores_(config.forwardingCores),
       numaNodes_(config.numaNodes),
       lruMapsFd_(kMaxForwardingCores),
-      hwAccelFd_(kMaxForwardingCores) {
+      hwAccelFd_(kMaxForwardingCores),
+      hwAccel2Fd_(kMaxForwardingCores) {
   for (uint32_t i = 0; i < config_.maxVips; i++) {
     vipNums_.push_back(i);
   }
@@ -168,6 +170,8 @@ void KatranLb::initialSanityChecking() {
                                    "quic_mapping"};
   std::vector<std::string> hw_accel_maps = {"vip_map_by_id",
                                             "hw_accel_mapping",
+                                            "hw_accel_mapping2",
+                                            "markid_pool_mapping",
                                             "hw_accel_events"};
 
   res = getKatranProgFd();
@@ -226,11 +230,21 @@ int KatranLb::createHwAccelMap(int size, int flags, int numaNode) {
       numaNode);
 }
 
+int KatranLb::createHwAccelMap2(int size, int flags, int numaNode) {
+  return bpfAdapter_.createBpfMap(
+      kBpfMapTypeLruHash,
+      sizeof(struct flow_key),
+      sizeof(uint32_t),
+      size,
+      flags,
+      numaNode);
+}
+
 void KatranLb::initLrus() {
   bool forwarding_cores_specified{false};
   bool numa_mapping_specified{false};
   int lru_map_flags = 0;
-  int lru_proto_fd, hw_accel_proto_fd = -1;
+  int lru_proto_fd, hw_accel_proto_fd = -1, hw_accel_proto_fd2 = -1;
   int res;
   if (forwardingCores_.size() != 0) {
     if (numaNodes_.size() != 0) {
@@ -270,6 +284,13 @@ void KatranLb::initLrus() {
           throw std::runtime_error("cant create HW acceleration map for forwarding core");
         }
         hwAccelFd_[core] = hw_accel_fd;
+
+        hw_accel_fd = createHwAccelMap2(per_core_lru_size, lru_map_flags, numa_node);
+        if (hw_accel_fd < 0) {
+          LOG(FATAL) << "can't creat HW acceleration map2 for core: " << core;
+          throw std::runtime_error("cant create HW acceleration map2 for forwarding core");
+        }
+        hwAccel2Fd_[core] = hw_accel_fd;
       }
     }
     forwarding_cores_specified = true;
@@ -283,6 +304,7 @@ void KatranLb::initLrus() {
     lru_proto_fd = lruMapsFd_[forwardingCores_[kFirstElem]];
     if (config_.enableHwAccel) {
       hw_accel_proto_fd = hwAccelFd_[forwardingCores_[kFirstElem]];
+      hw_accel_proto_fd2 = hwAccel2Fd_[forwardingCores_[kFirstElem]];
     }
   } else {
     // creating prototype for LRU's map-in-map. this code path would be hit
@@ -296,6 +318,10 @@ void KatranLb::initLrus() {
       if (hw_accel_proto_fd < 0) {
         throw std::runtime_error("can't create prototype map for test lru");
       }
+      hw_accel_proto_fd2 = createHwAccelMap2();
+      if (hw_accel_proto_fd2 < 0) {
+        throw std::runtime_error("can't create prototype map for test lru");
+      }
     }
   }
   res = bpfAdapter_.setInnerMapPrototype("lru_maps_mapping", lru_proto_fd);
@@ -305,6 +331,11 @@ void KatranLb::initLrus() {
   }
   if (config_.enableHwAccel) {
     res = bpfAdapter_.setInnerMapPrototype("hw_accel_mapping", hw_accel_proto_fd);
+    if (res < 0) {
+      throw std::runtime_error(
+          "can't update inner_maps_fds w/ prototype for main HW acceleration map");
+    }
+    res = bpfAdapter_.setInnerMapPrototype("hw_accel_mapping2", hw_accel_proto_fd2);
     if (res < 0) {
       throw std::runtime_error(
           "can't update inner_maps_fds w/ prototype for main HW acceleration map");
@@ -341,6 +372,12 @@ void KatranLb::attachHwAccelMaps() {
     if (res < 0) {
       throw std::runtime_error("cant HW acceleration map to forwarding core");
     }
+    map_fd = hwAccel2Fd_[core];
+    res = bpfAdapter_.bpfUpdateMap(
+        bpfAdapter_.getMapFdByName("hw_accel_mapping2"), &key, &map_fd);
+    if (res < 0) {
+      throw std::runtime_error("cant HW acceleration map2 to forwarding core");
+    }
   }
 }
 
@@ -358,13 +395,56 @@ void KatranLb::featureDiscovering() {
   }
 }
 
-bool KatranLb::createHwAccelEventsMap() {
+bool KatranLb::createHwAccelEventsMaps() {
     int map_fd = bpfAdapter_.getMapFdByName("hw_accel_events");
     if (map_fd < 0) {
-        VLOG(4) << "Cannot find fd for " << "hw_accel_events";
+        LOG(FATAL) << "Cannot find fd for " << "'hw_accel_events' map";
         return false;
     }
     return ::katran::startHwAccelerationThread(map_fd);
+}
+
+bool KatranLb::allocateHwAccelResources() {
+    auto n_cores = forwardingCores_.size();
+    if (n_cores <= 0) {
+        return false;
+    }
+    int map_fd = bpfAdapter_.getMapFdByName("markid_pool_mapping");
+    if (map_fd < 0) {
+        LOG(FATAL) << "Cannot find fd for " << "'markid_pool_mapping' map";
+        return false;
+    }
+    uint32_t range_start = 1;
+    const uint32_t range_elements = (kMaxHwMarkIds - 1u) / (uint32_t)n_cores;
+    const uint32_t highest_markid = kMaxHwMarkIds - 1u;
+    typeof n_cores i;
+    for (i = 0; i < forwardingCores_.size(); i++) {
+      auto core = forwardingCores_[i];
+      if ((core > kMaxForwardingCores) || core < 0) {
+          LOG(FATAL) << "Invalid forwarding core " << core;
+          return false;
+      }
+      if (range_start > highest_markid) {
+          LOG(FATAL) << "BUG!!! range_start=" << range_start << " > highest_markid=" << highest_markid;
+          return false;
+      }
+      uint32_t range_end = range_start + range_elements - 1;
+      if (range_end > highest_markid)
+          range_end = highest_markid;
+      struct hw_accel_markid_pool value;
+      value.range_start = range_start;
+      value.current_id = value.range_start;
+      value.range_end = range_end;
+      LOG(INFO) << "forwarding core " << core << " HW mark IDs [" << value.range_start << "-" << value.range_end << "]";
+      uint32_t key = core;
+      auto bpfError = bpfAdapter_.bpfUpdateMap(map_fd, &key, &value);
+      if (bpfError) {
+          LOG(FATAL) << "Failed to update " << "markid_pool_mapping" << " for forwarding core " << key;
+          return false;
+      }
+      range_start = range_end + 1u;
+    }
+    return true;
 }
 
 void KatranLb::loadBpfProgs() {
@@ -387,8 +467,11 @@ void KatranLb::loadBpfProgs() {
   featureDiscovering();
 
   if (config_.enableHwAccel) {
-    if (!createHwAccelEventsMap()) {
+    if (!createHwAccelEventsMaps()) {
       throw std::invalid_argument("can't create HW acceleration maps");
+    }
+    if (!allocateHwAccelResources()) {
+      throw std::invalid_argument("can't allocate HW acceleration resources");
     }
   }
 

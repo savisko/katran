@@ -125,6 +125,12 @@ struct hw_accel_event {
     __u32 rx_queue_index;
     struct flow_key flow;
 } __attribute__ ((packed));
+
+struct hw_accel_markid_pool {
+    __u32   range_start;
+    __u32   range_end;
+    __u32   current_id;
+};
 #endif // HW_ACCELERATION_ENABLED
 
 #endif // of _BALANCER_STRUCTS

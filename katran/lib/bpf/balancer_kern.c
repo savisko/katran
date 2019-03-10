@@ -312,8 +312,29 @@ static inline int process_encaped_pckt(void **data, void **data_end,
 static inline __attribute__((__always_inline__))
 __u32 allocate_hw_mark_id(__u32 cpu_num)
 {
-    (void)cpu_num;
-    return 10;
+    int ret;
+    uint32_t mark_id;
+    struct hw_accel_markid_pool *markids_pool = bpf_map_lookup_elem(&markid_pool_mapping, &cpu_num);
+    if (!markids_pool) {
+        bpf_debug("HW markIDs pool not found for CPU %u\n", cpu_num);
+        return 0;
+    }
+    mark_id = markids_pool->current_id;
+    if (mark_id < markids_pool->range_end) {
+        struct hw_accel_markid_pool value;
+        value.current_id = mark_id + 1;
+        value.range_start = markids_pool->range_start;
+        value.range_end = markids_pool->range_end;
+        if ((ret = bpf_map_update_elem(&markid_pool_mapping, &cpu_num, &value, BPF_ANY)) != 0) {
+            bpf_debug("Failed to update HW markIDs pool for CPU %u\n", cpu_num);
+            return 0;
+        }
+        return mark_id;
+    }
+    else {
+        bpf_debug("HW markIDs pool exhausted for CPU %u\n", cpu_num);
+        return 0;
+    }
 }
 
 static inline __attribute__((__always_inline__))
@@ -644,66 +665,83 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
   if (lru_map_updated && hw_accel_supported) {
       bpf_debug("lru_map_updated=1\n");
       if (!is_ipv6 && !(vip_info->flags & F_LRU_BYPASS) && !(vip_info->flags & F_QUIC_VIP) && !(pckt.flags & F_INLINE_DECAP)) {
-          __u32 cpu_num, mark_id;
-          void *hw_accel_map;
-          int ret;
+          __u32 cpu_num;
+          void *hw_accel_map, *hw_accel_map2;
 
           cpu_num = bpf_get_smp_processor_id();
           hw_accel_map = bpf_map_lookup_elem(&hw_accel_mapping, &cpu_num);
+          hw_accel_map2 = bpf_map_lookup_elem(&hw_accel_mapping2, &cpu_num);
+
           if (!hw_accel_map) {
               bpf_debug("HW acceleration map not found for CPU %u\n", cpu_num);
           }
+          else if (!hw_accel_map2) {
+              bpf_debug("HW acceleration map2 not found for CPU %u\n", cpu_num);
+          }
           else {
-              mark_id = allocate_hw_mark_id(cpu_num);
-              if (!mark_id) {
-                  bpf_debug("Failed to allocate mark_id\n");
+              void *existing_mark = bpf_map_lookup_elem(hw_accel_map2, &pckt.flow);
+              if (existing_mark) {
+                  bpf_debug("This flow already marked\n");
               }
               else {
-                  struct hw_accel_flow hw_flow;
-
-                  //bpf_debug("allocated mark_id %u\n", mark_id);
-
-                  hw_flow.vip_num = vip_num;
-                  hw_flow.real_key = pckt.real_index;
-                  hw_flow.flow = pckt.flow;
-
-                  //bpf_debug("calling bpf_map_update_elem for mark_id=%u, vip_num=%u, real_key=%u\n",
-                  //          mark_id, hw_flow.vip_num, hw_flow.real_key);
-                  if ((ret = bpf_map_update_elem(hw_accel_map, &mark_id, &hw_flow, BPF_ANY)) != 0) {
-                      bpf_debug("bpf_map_update_elem() failed: %d\n", ret);
-                      deallocate_hw_mark_id(cpu_num, mark_id);
+                  __u32 mark_id = allocate_hw_mark_id(cpu_num);
+                  if (!mark_id) {
+                      bpf_debug("Failed to allocate mark_id\n");
                   }
-                  else
-                  {
-                      /* Metadata will be in the perf event before the packet data. */
-                      struct hw_accel_event metadata;
-                      __u64 flags;
-                      __u16 sample_size;
+                  else {
+                      int ret;
+                      struct hw_accel_flow hw_flow;
 
-                      /* The XDP perf_event_output handler will use the upper 32 bits
-                       * of the flags argument as a number of bytes to include of the
-                       * packet payload in the event data. If the size is too big, the
-                       * call to bpf_perf_event_output will fail and return -EFAULT.
-                       *
-                       * See bpf_xdp_event_output in net/core/filter.c.
-                       *
-                       * The BPF_F_CURRENT_CPU flag means that the event output fd
-                       * will be indexed by the CPU number in the event map.
-                       */
-                      flags = BPF_F_CURRENT_CPU;
-                      sample_size = 16;
+                      bpf_debug("allocated mark_id %u\n", mark_id);
 
-                      metadata.real_ip = dst->dst;
-                      metadata.mark_id = mark_id;
-                      metadata.rx_queue_index = ctx->rx_queue_index;
-                      metadata.flow = pckt.flow;
+                      hw_flow.vip_num = vip_num;
+                      hw_flow.real_key = pckt.real_index;
+                      hw_flow.flow = pckt.flow;
 
-                      flags |= (__u64)sample_size << 32;
+                      __u32 value = mark_id;
 
-                      bpf_debug("calling bpf_perf_event_output()\n");
-                      ret = bpf_perf_event_output(ctx, &hw_accel_events, flags, &metadata, sizeof(metadata));
-                      if (ret)
-                          bpf_debug("bpf_perf_event_output() failed: %d\n", ret);
+                      //bpf_debug("calling bpf_map_update_elem for mark_id=%u, vip_num=%u, real_key=%u\n",
+                      //          mark_id, hw_flow.vip_num, hw_flow.real_key);
+                      if ((ret = bpf_map_update_elem(hw_accel_map, &mark_id, &hw_flow, BPF_ANY)) != 0) {
+                          bpf_debug("bpf_map_update_elem() failed: %d\n", ret);
+                          deallocate_hw_mark_id(cpu_num, mark_id);
+                      }
+                      else if ((ret = bpf_map_update_elem(hw_accel_map2, &pckt.flow, &value, BPF_ANY)) != 0) {
+                          bpf_debug("bpf_map_update_elem() failed: %d\n", ret);
+                          deallocate_hw_mark_id(cpu_num, mark_id);
+                      }
+                      else
+                      {
+                          /* Metadata will be in the perf event before the packet data. */
+                          struct hw_accel_event metadata;
+                          __u64 flags;
+                          __u16 sample_size;
+
+                          /* The XDP perf_event_output handler will use the upper 32 bits
+                           * of the flags argument as a number of bytes to include of the
+                           * packet payload in the event data. If the size is too big, the
+                           * call to bpf_perf_event_output will fail and return -EFAULT.
+                           *
+                           * See bpf_xdp_event_output in net/core/filter.c.
+                           *
+                           * The BPF_F_CURRENT_CPU flag means that the event output fd
+                           * will be indexed by the CPU number in the event map.
+                           */
+                          flags = BPF_F_CURRENT_CPU;
+                          sample_size = 16;
+
+                          metadata.real_ip = dst->dst;
+                          metadata.mark_id = mark_id;
+                          metadata.rx_queue_index = ctx->rx_queue_index;
+                          metadata.flow = pckt.flow;
+
+                          flags |= (__u64)sample_size << 32;
+
+                          bpf_debug("calling bpf_perf_event_output()\n");
+                          ret = bpf_perf_event_output(ctx, &hw_accel_events, flags, &metadata, sizeof(metadata));
+                          if (ret)
+                              bpf_debug("bpf_perf_event_output() failed: %d\n", ret);
+                      }
                   }
               }
           }

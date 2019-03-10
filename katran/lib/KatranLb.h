@@ -534,13 +534,19 @@ class KatranLb {
       int size = kFallbackLruSize,
       int flags = kMapNoFlags,
       int numaNode = kNoNuma);
+  int createHwAccelMap2(
+      int size = kFallbackLruSize,
+      int flags = kMapNoFlags,
+      int numaNode = kNoNuma);
 
   /**
    * helper function which do forwarding plane feature discovering
    */
   void featureDiscovering();
 
-  bool createHwAccelEventsMap();
+  bool createHwAccelEventsMaps();
+
+  bool allocateHwAccelResources();
 
   /**
    * helper function to validate that specified string is a valid ip address
@@ -681,6 +687,7 @@ class KatranLb {
    * vector of HW acceleration maps descriptors;
    */
   std::vector<int> hwAccelFd_;
+  std::vector<int> hwAccel2Fd_;
 };
 
 } // namespace katran
