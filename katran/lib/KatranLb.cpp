@@ -401,7 +401,7 @@ bool KatranLb::createHwAccelEventsMaps() {
         LOG(FATAL) << "Cannot find fd for " << "'hw_accel_events' map";
         return false;
     }
-    return ::katran::startHwAccelerationThread(map_fd);
+    return ::katran::startHwAccelerationThread(config_.mainInterface.c_str(), map_fd);
 }
 
 bool KatranLb::allocateHwAccelResources() {

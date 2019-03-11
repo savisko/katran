@@ -23,6 +23,6 @@
 
 namespace katran {
 
-extern bool startHwAccelerationThread(int bpf_map_fd);
+extern bool startHwAccelerationThread(const char *if_name, int bpf_map_fd);
 
 }

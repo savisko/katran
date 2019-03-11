@@ -19,6 +19,7 @@
  *  Created on: Mar 5, 2019
  */
 
+extern "C" {
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -40,6 +41,9 @@
 #include <bpf/libbpf.h>
 #include <linux/perf_event.h>
 #include <linux/bpf.h>
+#include <net/if.h>
+#include <netinet/in.h>
+}
 
 #include "HwAcceleration.h"
 #include "katran/lib/BalancerStructs.h"
@@ -51,13 +55,13 @@ namespace katran {
 #define MAX_CPUS 128
 
 
-typedef enum bpf_perf_event_ret (*perf_event_print_fn)(void *data, uint32_t size);
+typedef enum bpf_perf_event_ret (*perf_event_action_fn)(void *data, uint32_t size);
 
 static int perf_event_mmap_header(int fd, struct perf_event_mmap_page **header);
 
 /* return LIBBPF_PERF_EVENT_DONE or LIBBPF_PERF_EVENT_ERROR */
 static int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **headers,
-                                   unsigned int num_fds, perf_event_print_fn output_fn);
+                                   unsigned int num_fds, perf_event_action_fn action_fn);
 
 void* katran_hw_accel_daemon(void *arg);
 
@@ -67,9 +71,63 @@ static int page_size;
 static int page_cnt = 16;
 static int pmu_fds[MAX_CPUS];
 static struct perf_event_mmap_page *headers[MAX_CPUS];
+static char tc_if_name[IF_NAMESIZE];
 
 
-static enum bpf_perf_event_ret print_bpf_output(void *data, uint32_t size)
+static int setup_tc_rule(struct flow_key *flow, uint32_t mark_id, uint32_t rx_queue)
+{
+    int ret, val;
+    const char *ip_proto_str;
+    char src_ip_str[64], dst_ip_str[64];
+    unsigned int src_port, dst_port;
+    char buffer[8192];
+
+    if (flow->proto == IPPROTO_UDP)
+        ip_proto_str = "udp";
+    else if (flow->proto == IPPROTO_TCP)
+        ip_proto_str = "tcp";
+    else
+    {
+        printf("Unexpected IP protocol %u\n", (unsigned int) flow->proto);
+        return -1;
+    }
+
+    inet_ntop(AF_INET, &flow->src,  src_ip_str,  sizeof(src_ip_str));
+    inet_ntop(AF_INET, &flow->dst,  dst_ip_str,  sizeof(dst_ip_str));
+    src_port = (unsigned int) be16toh(flow->port16[0]);
+    dst_port = (unsigned int) be16toh(flow->port16[1]);
+
+    snprintf(buffer, sizeof(buffer), "tc filter add dev %s ingress protocol ip flower indev %s ip_proto %s src_ip %s dst_ip %s src_port %u dst_port %u action mark %u",
+             tc_if_name, tc_if_name, ip_proto_str, src_ip_str, dst_ip_str, src_port, dst_port, mark_id);
+
+    ret = system(buffer);
+
+    if (WIFSIGNALED(ret))
+    {
+        val = WTERMSIG(ret);
+        printf("Command '%s' terminated by signal %d\n", buffer, val);
+        return -1;
+    }
+    else if (WIFSTOPPED(ret))
+    {
+        val = WSTOPSIG(ret);
+        printf("Child process of command '%s' has stopped by signal %d\n", buffer, val);
+        return -1;
+    }
+    else if (WIFEXITED(ret))
+    {
+        val = WEXITSTATUS(ret);
+        printf("Command '%s' execution returned %d\n", buffer, val);
+    }
+    else
+    {
+        printf("Command '%s' execution produced unexpected result 0x%08x\n", buffer, ret);
+        return -1;
+    }
+    return 0;
+}
+
+static enum bpf_perf_event_ret bpf_event_action_hook(void *data, uint32_t size)
 {
     struct katran::hw_accel_event *e;
 
@@ -90,6 +148,8 @@ static enum bpf_perf_event_ret print_bpf_output(void *data, uint32_t size)
     for (unsigned int i = 0; i < 14; i++)
         printf("%02x ", pkt_data[i]);
     printf("\n");
+
+    setup_tc_rule(&(e->flow), mark_id, rx_queue);
 
     return LIBBPF_PERF_EVENT_CONT;
 }
@@ -121,7 +181,7 @@ static enum bpf_perf_event_ret
 bpf_perf_event_print(struct perf_event_header *hdr, void *private_data)
 {
     if (hdr->type == PERF_RECORD_SAMPLE) {
-        perf_event_print_fn fn = reinterpret_cast<perf_event_print_fn>(private_data);
+        perf_event_action_fn fn = reinterpret_cast<perf_event_action_fn>(private_data);
         struct perf_event_sample *e = reinterpret_cast<struct perf_event_sample*>(hdr);
         enum bpf_perf_event_ret ret = fn(e->data, e->size);
         if (ret != LIBBPF_PERF_EVENT_CONT)
@@ -140,7 +200,7 @@ bpf_perf_event_print(struct perf_event_header *hdr, void *private_data)
     return LIBBPF_PERF_EVENT_CONT;
 }
 
-static int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **headers, unsigned int num_fds, perf_event_print_fn output_fn)
+static int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **headers, unsigned int num_fds, perf_event_action_fn action_fn)
 {
     enum bpf_perf_event_ret ret;
     struct pollfd *pfds;
@@ -178,7 +238,7 @@ static int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **heade
                              page_cnt * page_size,
                              page_size, &buf, &len,
                              &bpf_perf_event_print,
-                             reinterpret_cast<void*>(output_fn));
+                             reinterpret_cast<void*>(action_fn));
             if (ret != LIBBPF_PERF_EVENT_CONT) {
                 LOG(ERROR) << "bpf_perf_event_read_simple() returned " << ret;
                 break;
@@ -199,7 +259,7 @@ void* katran_hw_accel_daemon(void *arg)
 
     (void)arg;
 
-    ret = perf_event_poller_multi(pmu_fds, headers, (unsigned int)numcpus, &print_bpf_output);
+    ret = perf_event_poller_multi(pmu_fds, headers, (unsigned int)numcpus, &bpf_event_action_hook);
     (void)ret;
 
     return NULL;
@@ -247,8 +307,17 @@ static bool test_bpf_perf_event(int map_fd, int num)
 }
 
 
-bool startHwAccelerationThread(int bpf_map_fd)
+bool startHwAccelerationThread(const char *if_name, int bpf_map_fd)
 {
+    if (!if_name || *if_name == '\0') {
+        return false;
+    }
+    if (bpf_map_fd < 0) {
+        return false;
+    }
+
+    strncpy(tc_if_name, if_name, IF_NAMESIZE);
+
     numcpus = get_nprocs();
 
     if (numcpus <= 0) {
