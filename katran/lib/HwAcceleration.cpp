@@ -73,19 +73,55 @@ static int pmu_fds[MAX_CPUS];
 static struct perf_event_mmap_page *headers[MAX_CPUS];
 static char tc_if_name[IF_NAMESIZE];
 
+static int run_system_command(const char *cmd, int *ret_code)
+{
+    int val;
+    int ret = system(cmd);
+
+    if (WIFSIGNALED(ret))
+    {
+        val = WTERMSIG(ret);
+        printf("Command '%s' terminated by signal %d\n", cmd, val);
+        return -1;
+    }
+    else if (WIFSTOPPED(ret))
+    {
+        val = WSTOPSIG(ret);
+        printf("Child process of command '%s' has stopped by signal %d\n", cmd, val);
+        return -1;
+    }
+    else if (WIFEXITED(ret))
+    {
+        val = WEXITSTATUS(ret);
+        //printf("Command '%s' execution returned %d\n", cmd, val);
+        if (ret_code)
+            *ret_code = val;
+    }
+    else
+    {
+        printf("Command '%s' execution produced unexpected result 0x%08x\n", cmd, ret);
+        return -1;
+    }
+    return 0;
+}
+
 
 static int setup_tc_rule(struct flow_key *flow, uint32_t mark_id, uint32_t rx_queue)
 {
-    int ret, val;
-    const char *ip_proto_str;
+    //const char *ip_proto_str;
+    int ret, ret_code;
     char src_ip_str[64], dst_ip_str[64];
     unsigned int src_port, dst_port;
     char buffer[8192];
 
     if (flow->proto == IPPROTO_UDP)
-        ip_proto_str = "udp";
+    {
+        //ip_proto_str = "udp";
+    }
     else if (flow->proto == IPPROTO_TCP)
-        ip_proto_str = "tcp";
+    {
+        //ip_proto_str = "tcp";
+    }
     else
     {
         printf("Unexpected IP protocol %u\n", (unsigned int) flow->proto);
@@ -97,33 +133,18 @@ static int setup_tc_rule(struct flow_key *flow, uint32_t mark_id, uint32_t rx_qu
     src_port = (unsigned int) be16toh(flow->port16[0]);
     dst_port = (unsigned int) be16toh(flow->port16[1]);
 
-    snprintf(buffer, sizeof(buffer), "tc filter add dev %s ingress protocol ip flower indev %s ip_proto %s src_ip %s dst_ip %s src_port %u dst_port %u action mark %u",
-             tc_if_name, tc_if_name, ip_proto_str, src_ip_str, dst_ip_str, src_port, dst_port, mark_id);
+    snprintf(buffer, sizeof(buffer),
+            "tc filter add dev %s protocol ip parent ffff: flower indev %s skip_sw ip_proto %u src_ip %s dst_ip %s src_port %u dst_port %u action skbedit mark %u queue_mapping %u",
+             tc_if_name, tc_if_name, (unsigned int) flow->proto, src_ip_str, dst_ip_str, src_port, dst_port, mark_id, rx_queue);
 
-    ret = system(buffer);
+    ret = run_system_command(buffer, &ret_code);
+    if (ret != 0)
+        return -1;
 
-    if (WIFSIGNALED(ret))
-    {
-        val = WTERMSIG(ret);
-        printf("Command '%s' terminated by signal %d\n", buffer, val);
-        return -1;
+    if (ret_code != 0) {
+        printf("Command '%s' returned %d - probably failed.\n", buffer, ret_code);
     }
-    else if (WIFSTOPPED(ret))
-    {
-        val = WSTOPSIG(ret);
-        printf("Child process of command '%s' has stopped by signal %d\n", buffer, val);
-        return -1;
-    }
-    else if (WIFEXITED(ret))
-    {
-        val = WEXITSTATUS(ret);
-        printf("Command '%s' execution returned %d\n", buffer, val);
-    }
-    else
-    {
-        printf("Command '%s' execution produced unexpected result 0x%08x\n", buffer, ret);
-        return -1;
-    }
+
     return 0;
 }
 
@@ -133,10 +154,11 @@ static enum bpf_perf_event_ret bpf_event_action_hook(void *data, uint32_t size)
 
     e = reinterpret_cast<struct katran::hw_accel_event*>(data);
 
-    uint32_t vip_ip = e->flow.dst;
-    uint32_t real_ip = e->real_ip;
     uint32_t mark_id = e->mark_id;
     uint32_t rx_queue = e->rx_queue_index;
+    /*
+    uint32_t vip_ip = e->flow.dst;
+    uint32_t real_ip = e->real_ip;
     uint8_t *pkt_data = (uint8_t*) (e + 1);
 
     char vip_string[64], real_string[64];
@@ -147,7 +169,7 @@ static enum bpf_perf_event_ret bpf_event_action_hook(void *data, uint32_t size)
             mark_id, rx_queue);
     for (unsigned int i = 0; i < 14; i++)
         printf("%02x ", pkt_data[i]);
-    printf("\n");
+    printf("\n");*/
 
     setup_tc_rule(&(e->flow), mark_id, rx_queue);
 
@@ -232,7 +254,7 @@ static int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **heade
             if (!pfds[i].revents)
                 continue;
 
-            printf("perf_event on fd=%d\n", pfds[i].fd);
+            //printf("perf_event on fd=%d\n", pfds[i].fd);
 
             ret = bpf_perf_event_read_simple(headers[i],
                              page_cnt * page_size,

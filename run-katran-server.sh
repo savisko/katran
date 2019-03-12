@@ -31,8 +31,17 @@ FORWARDING_CPU_CORES="0,1,2,3"
 echo $$ >$PID_FILE
 
 if ! tc qd show dev $KATRAN_IF | grep -q clsact; then
-	echo "* adding qdisc dev $KATRAN_IF clsact"
-	sudo tc qdisc add dev $KATRAN_IF clsact
+	echo "Skip \"* adding qdisc dev $KATRAN_IF clsact\""
+#	echo "* adding qdisc dev $KATRAN_IF clsact"
+#	sudo tc qdisc add dev $KATRAN_IF clsact
+fi
+
+echo "* turn on hw-tc-offload for $KATRAN_IF"
+sudo ethtool -K $KATRAN_IF hw-tc-offload on
+
+if ! tc qdisc show dev $KATRAN_IF | grep ingress; then
+	echo "* adding ingress qdisc dev $KATRAN_IF"
+	sudo tc qdisc add dev $KATRAN_IF ingress
 fi
 
 ./remove-ipip-ifs.sh > /dev/null 2>&1
