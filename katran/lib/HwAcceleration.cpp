@@ -24,13 +24,13 @@ extern "C" {
 #define _GNU_SOURCE
 #endif
 #include <stdint.h>
-#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
 #include <string.h>
+#include <endian.h>
 #include <sys/sysinfo.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
@@ -73,58 +73,50 @@ static int pmu_fds[MAX_CPUS];
 static struct perf_event_mmap_page *headers[MAX_CPUS];
 static char tc_if_name[IF_NAMESIZE];
 
+
 static int run_system_command(const char *cmd, int *ret_code)
 {
     int val;
     int ret = system(cmd);
 
-    if (WIFSIGNALED(ret))
-    {
-        val = WTERMSIG(ret);
-        printf("Command '%s' terminated by signal %d\n", cmd, val);
-        return -1;
-    }
-    else if (WIFSTOPPED(ret))
-    {
-        val = WSTOPSIG(ret);
-        printf("Child process of command '%s' has stopped by signal %d\n", cmd, val);
-        return -1;
-    }
-    else if (WIFEXITED(ret))
+    if (WIFEXITED(ret))
     {
         val = WEXITSTATUS(ret);
         //printf("Command '%s' execution returned %d\n", cmd, val);
         if (ret_code)
             *ret_code = val;
+        return 0;
+    }
+    else if (WIFSIGNALED(ret))
+    {
+        val = WTERMSIG(ret);
+        LOG(ERROR) << "Command '" << cmd << "' terminated by signal " << val;
+        return -1;
+    }
+    else if (WIFSTOPPED(ret))
+    {
+        val = WSTOPSIG(ret);
+        LOG(ERROR) << "Child process of command '" << cmd << "' has stopped by signal " << val;
+        return -1;
     }
     else
     {
-        printf("Command '%s' execution produced unexpected result 0x%08x\n", cmd, ret);
+        LOG(ERROR) << "Command '" << cmd << "' execution produced unexpected result " << val;
         return -1;
     }
-    return 0;
 }
 
 
 static int setup_tc_rule(struct flow_key *flow, uint32_t mark_id, uint32_t rx_queue)
 {
-    //const char *ip_proto_str;
     int ret, ret_code;
     char src_ip_str[64], dst_ip_str[64];
     unsigned int src_port, dst_port;
-    char buffer[8192];
+    char buffer[4096];
 
-    if (flow->proto == IPPROTO_UDP)
+    if (flow->proto != IPPROTO_UDP && flow->proto != IPPROTO_TCP)
     {
-        //ip_proto_str = "udp";
-    }
-    else if (flow->proto == IPPROTO_TCP)
-    {
-        //ip_proto_str = "tcp";
-    }
-    else
-    {
-        printf("Unexpected IP protocol %u\n", (unsigned int) flow->proto);
+        LOG(ERROR) << "Unexpected IP protocol " << (unsigned int) flow->proto;
         return -1;
     }
 
@@ -133,16 +125,19 @@ static int setup_tc_rule(struct flow_key *flow, uint32_t mark_id, uint32_t rx_qu
     src_port = (unsigned int) be16toh(flow->port16[0]);
     dst_port = (unsigned int) be16toh(flow->port16[1]);
 
+    /* TODO: queue mapping is not implemented yet in mlnx5_code */
+    (void)rx_queue;
+
     snprintf(buffer, sizeof(buffer),
-            "tc filter add dev %s protocol ip parent ffff: flower indev %s skip_sw ip_proto %u src_ip %s dst_ip %s src_port %u dst_port %u action skbedit mark %u queue_mapping %u",
-             tc_if_name, tc_if_name, (unsigned int) flow->proto, src_ip_str, dst_ip_str, src_port, dst_port, mark_id, rx_queue);
+            "tc filter add dev %s protocol ip parent ffff: flower indev %s skip_sw ip_proto %u src_ip %s dst_ip %s src_port %u dst_port %u action skbedit mark %u",
+             tc_if_name, tc_if_name, (unsigned int) flow->proto, src_ip_str, dst_ip_str, src_port, dst_port, mark_id);
 
     ret = run_system_command(buffer, &ret_code);
     if (ret != 0)
         return -1;
 
     if (ret_code != 0) {
-        printf("Command '%s' returned %d - probably failed.\n", buffer, ret_code);
+        LOG(ERROR) << "Command '" << buffer << "' returned " << ret_code << " probably failed.";
     }
 
     return 0;
@@ -214,9 +209,9 @@ bpf_perf_event_print(struct perf_event_header *hdr, void *private_data)
             uint64_t id;
             uint64_t lost;
         } *lost = reinterpret_cast<struct perf_event_lost*>(hdr);
-        printf("lost %" PRIu64 " events\n", lost->lost);
+        LOG(ERROR) << "lost " << lost->lost << " events";
     } else {
-        printf("unknown event type=%d size=%u\n", hdr->type, (unsigned int)hdr->size);
+        LOG(ERROR) << "unknown event type=" << hdr->type << " size=" << (unsigned int)hdr->size;
     }
 
     return LIBBPF_PERF_EVENT_CONT;

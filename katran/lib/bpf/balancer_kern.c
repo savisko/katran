@@ -20,7 +20,7 @@
 #include "pckt_parsing.h"
 #include "handle_icmp.h"
 
-#define BPF_DEBUG_ENABLE
+//#define BPF_DEBUG_ENABLE
 
 
 #ifdef HW_ACCELERATION_ENABLED
