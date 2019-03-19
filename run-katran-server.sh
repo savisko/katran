@@ -36,13 +36,18 @@ if ! tc qd show dev $KATRAN_IF | grep -q clsact; then
 #	sudo tc qdisc add dev $KATRAN_IF clsact
 fi
 
-echo "* turn on hw-tc-offload for $KATRAN_IF"
-sudo ethtool -K $KATRAN_IF hw-tc-offload on
+if ! ethtool -k $KATRAN_IF | grep "hw-tc-offload: on"; then
+	echo "* turn on hw-tc-offload for $KATRAN_IF"
+	sudo ethtool -K $KATRAN_IF hw-tc-offload on
+fi
 
 if ! tc qdisc show dev $KATRAN_IF | grep ingress; then
 	echo "* adding ingress qdisc dev $KATRAN_IF"
 	sudo tc qdisc add dev $KATRAN_IF ingress
 fi
+
+echo "* deleting all filter rules on $KATRAN_IF"
+sudo tc filter del dev $KATRAN_IF parent ffff:
 
 ./remove-ipip-ifs.sh > /dev/null 2>&1
 echo "* creating ipip ifs"
@@ -66,8 +71,8 @@ sudo $CMD
 echo "* removing ipip ifs"
 ./remove-ipip-ifs.sh
 
-echo "* deleting qdisc dev $KATRAN_IF clsact"
-sudo tc qdisc del dev $KATRAN_IF clsact
+#echo "* deleting qdisc dev $KATRAN_IF clsact"
+#sudo tc qdisc del dev $KATRAN_IF clsact
 
 printf "" > $PID_FILE
 
