@@ -19,6 +19,8 @@
 #include <folly/Format.h>
 #include <folly/MacAddress.h>
 
+#include <glog/logging.h>
+
 namespace katran {
 
 std::vector<uint8_t> convertMacToUint(std::string macAddress) {
