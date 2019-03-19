@@ -24,6 +24,12 @@
 
 
 #ifdef HW_ACCELERATION_ENABLED
+#define bpf_error(fmt, ...) \
+({ \
+char ____fmt[] = fmt; \
+bpf_trace_printk(____fmt, sizeof(____fmt), \
+##__VA_ARGS__); \
+})
 #ifdef BPF_DEBUG_ENABLE
 #define bpf_debug(fmt, ...) \
 ({ \
@@ -35,7 +41,15 @@ bpf_trace_printk(____fmt, sizeof(____fmt), \
 #define bpf_debug(fmt, ...)
 #endif
 #else
+#define bpf_error(fmt, ...)
 #define bpf_debug(fmt, ...)
+#endif
+
+#ifdef HW_ACCELERATION_ENABLED
+#ifndef likely
+#define likely(x)   __builtin_expect( !!(x), 1 )
+#define unlikely(x) __builtin_expect( !!(x), 0 )
+#endif
 #endif
 
 
@@ -314,9 +328,10 @@ __u32 allocate_hw_mark_id(__u32 cpu_num)
 {
     int ret;
     uint32_t mark_id;
+    //__u32 cpu_id = cpu_num;
     struct hw_accel_markid_pool *markids_pool = bpf_map_lookup_elem(&markid_pool_mapping, &cpu_num);
     if (!markids_pool) {
-        bpf_debug("HW markIDs pool not found for CPU %u\n", cpu_num);
+        //bpf_error("HW markIDs pool not found for CPU %u\n", cpu_id);
         return 0;
     }
     mark_id = markids_pool->current_id;
@@ -326,13 +341,14 @@ __u32 allocate_hw_mark_id(__u32 cpu_num)
         value.range_start = markids_pool->range_start;
         value.range_end = markids_pool->range_end;
         if ((ret = bpf_map_update_elem(&markid_pool_mapping, &cpu_num, &value, BPF_ANY)) != 0) {
-            bpf_debug("Failed to update HW markIDs pool for CPU %u\n", cpu_num);
+            //bpf_error("Failed to update HW markIDs pool for CPU %u\n", cpu_id);
             return 0;
         }
         return mark_id;
     }
     else {
-        bpf_debug("HW markIDs pool exhausted for CPU %u\n", cpu_num);
+	//__u32 cpu_id = bpf_get_smp_processor_id();
+        //bpf_error("HW markIDs pool exhausted for CPU %u\n", cpu_id);
         return 0;
     }
 }
@@ -351,8 +367,7 @@ struct xdp_md_mark {
 
 __attribute__((__always_inline__))
 #ifdef HW_ACCELERATION_ENABLED
-static inline int process_packet(struct xdp_md *ctx, void *data, __u64 off, void *data_end,
-                                 bool is_ipv6, struct xdp_md *xdp) {
+static inline int process_packet(struct xdp_md *ctx, void *data, void *data_end, struct xdp_md *xdp) {
 #else
 static inline int process_packet(void *data, __u64 off, void *data_end,
                                  bool is_ipv6, struct xdp_md *xdp) {
@@ -367,6 +382,8 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
   __u64 iph_len;
   __u8 protocol;
 #ifdef HW_ACCELERATION_ENABLED
+  __u64 off = 0;
+  bool is_ipv6 = false;
   int hw_accel_supported = 0, lru_map_updated = 0, bypass_vip_lookup = 0;
 #endif
 
@@ -377,50 +394,52 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
 
 #ifdef HW_ACCELERATION_ENABLED
   struct xdp_md_mark *mark_ptr = (struct xdp_md_mark *)(uintptr_t)xdp->data_meta;
-  if (mark_ptr + 1 <= data) {
+  if (likely(mark_ptr + 1 <= data)) {
       __u32 cpu_num, mark_id;
       void *hw_accel_map;
 
       cpu_num = bpf_get_smp_processor_id();
       hw_accel_map = bpf_map_lookup_elem(&hw_accel_mapping, &cpu_num);
-      if (hw_accel_map) {
+      if (likely(hw_accel_map)) {
           hw_accel_supported = 1;
           mark_id = mark_ptr->mark;
-          if (mark_id != 0) {
+          if (likely(mark_id != 0)) {
               struct hw_accel_flow *hw_flow;
-              bpf_debug("Received marked packet - mark_id %u\n", mark_id);
+              //bpf_debug("Received marked packet - mark_id %u\n", mark_id);
               hw_flow = bpf_map_lookup_elem(hw_accel_map, &mark_id);
-              if (hw_flow) {
+              if (likely(hw_flow)) {
                   vip_num = hw_flow->vip_num;
+                  is_ipv6 = hw_flow->is_ipv6;
                   pckt.real_index = hw_flow->real_key;
                   pckt.flow = hw_flow->flow;
                   pckt.flags = 0;
                   vip_info = bpf_map_lookup_elem(&vip_map_by_id, &vip_num);
-                  if (vip_info) {
+                  if (likely(vip_info)) {
                       __u32 key = pckt.real_index;
                       dst = bpf_map_lookup_elem(&reals, &key);
-                      if (dst) {
-                          pkt_bytes = (__u16) ((__u64)(data_end - data) - off);
+                      if (likely(dst)) {
+                          pkt_bytes = (__u16) ((__u64)(data_end - data) - sizeof(struct eth_hdr));
                           bypass_vip_lookup = 1;
                       }
                       else {
-                          bpf_debug("Real not found for real_index %u\n", key);
+                          //bpf_debug("Real not found for real_index %u\n", key);
                       }
                   }
                   else {
-                      bpf_debug("VIP not found for vip_num %u\n", vip_num);
+                      //bpf_debug("VIP not found for vip_num %u\n", vip_num);
                   }
               }
               else {
-                  bpf_debug("hw_flow not found for mark_id %u\n", mark_id);
+		  //__u32 cpu_id = bpf_get_smp_processor_id();
+                  //bpf_debug("hw_flow not found for mark_id %u on CPU %u\n", mark_id, cpu_id);
               }
           }
           else {
-              bpf_debug("Received NOT marked packet\n");
+              //bpf_debug("Received NOT marked packet\n");
           }
       }
       else {
-          bpf_debug("HW acceleration map not found for CPU %u\n", cpu_num);
+          //bpf_debug("HW acceleration map not found for CPU %u\n", cpu_num);
       }
   }
   else {
@@ -429,7 +448,27 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
 #endif /* HW_ACCELERATION_ENABLED */
 
 #ifdef HW_ACCELERATION_ENABLED
-  if (!bypass_vip_lookup) {
+  if (unlikely(!bypass_vip_lookup)) {
+      __u32 eth_proto;
+      struct eth_hdr *eth = data;
+
+      off = sizeof(struct eth_hdr);
+
+      if (data + off > data_end) {
+        // bogus packet, len less than minimum ethernet frame size
+        return XDP_DROP;
+      }
+
+      eth_proto = eth->eth_proto;
+
+      if (likely(eth_proto == BE_ETH_P_IP)) {
+          is_ipv6 = false;
+      } else if (eth_proto == BE_ETH_P_IPV6) {
+          is_ipv6 = true;
+      } else {
+        // pass to tcp/ip stack
+        return XDP_PASS;
+      }
 #endif
   action = process_l3_headers(
     &pckt, &protocol, off, &pkt_bytes, data, data_end, is_ipv6);
@@ -505,8 +544,10 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
       pckt.flow.port16[1] = 0;
     }
   }
-  bpf_debug("VIP found\n");
 #ifdef HW_ACCELERATION_ENABLED
+  }
+  else {
+	  //bpf_error("bypass_vip_lookup\n");
   }
 #endif
 
@@ -577,29 +618,11 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
 
     if (!(pckt.flags & F_SYN_SET) &&
         !(vip_info->flags & F_LRU_BYPASS)) {
+      //bpf_debug("Lookup in connection_table\n");
       connection_table_lookup(&dst, &pckt, lru_map);
-#ifdef HW_ACCELERATION_ENABLED
-      if (dst) {
-          bpf_debug("lru_map match\n", cpu_num);
-      }
-      else {
-          bpf_debug("lru_map miss\n", cpu_num);
-      }
-#endif
     }
-#ifdef HW_ACCELERATION_ENABLED
-    else {
-        if (pckt.flags & F_SYN_SET)
-        {
-            bpf_debug("F_SYN_SET\n", cpu_num);
-        }
-        if (vip_info->flags & F_LRU_BYPASS)
-        {
-            bpf_debug("F_LRU_BYPASS\n", cpu_num);
-        }
-    }
-#endif
     if (!dst) {
+      //bpf_debug("dst not found\n");
       if (pckt.flow.proto == IPPROTO_TCP) {
         __u32 lru_stats_key = MAX_VIPS + LRU_MISS_CNTR;
         struct lb_stats *lru_stats = bpf_map_lookup_elem(
@@ -627,8 +650,6 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
 #endif
     }
   }
-
-  bpf_debug("Destination found: flags=%x, dst=%x\n", (__u32) dst->flags, dst->dst);
 
   cval = bpf_map_lookup_elem(&ctl_array, &mac_addr_pos);
 
@@ -662,92 +683,113 @@ static inline int process_packet(void *data, __u64 off, void *data_end,
   data_stats->v2 += pkt_bytes;
 
 #ifdef HW_ACCELERATION_ENABLED
-  if (lru_map_updated && hw_accel_supported) {
-      bpf_debug("lru_map_updated=1\n");
-      if (!is_ipv6 && !(vip_info->flags & F_LRU_BYPASS) && !(vip_info->flags & F_QUIC_VIP) && !(pckt.flags & F_INLINE_DECAP)) {
-          __u32 cpu_num;
-          void *hw_accel_map, *hw_accel_map2;
-
-          cpu_num = bpf_get_smp_processor_id();
-          hw_accel_map = bpf_map_lookup_elem(&hw_accel_mapping, &cpu_num);
-          hw_accel_map2 = bpf_map_lookup_elem(&hw_accel_mapping2, &cpu_num);
-
-          if (!hw_accel_map) {
-              bpf_debug("HW acceleration map not found for CPU %u\n", cpu_num);
+  if (unlikely(lru_map_updated && hw_accel_supported)) {
+      do {
+          //bpf_debug("lru_map_updated=1\n");
+          if (unlikely(is_ipv6))
+          {
+              break;
           }
-          else if (!hw_accel_map2) {
-              bpf_debug("HW acceleration map2 not found for CPU %u\n", cpu_num);
+
+          if (unlikely((vip_info->flags & F_LRU_BYPASS) || (vip_info->flags & F_QUIC_VIP) || (pckt.flags & F_INLINE_DECAP)))
+          {
+              break;
           }
-          else {
-              void *existing_mark = bpf_map_lookup_elem(hw_accel_map2, &pckt.flow);
-              if (existing_mark) {
-                  bpf_debug("This flow already marked\n");
-              }
-              else {
-                  __u32 mark_id = allocate_hw_mark_id(cpu_num);
-                  if (!mark_id) {
-                      bpf_debug("Failed to allocate mark_id\n");
-                  }
-                  else {
-                      int ret;
-                      struct hw_accel_flow hw_flow;
 
-                      bpf_debug("allocated mark_id %u\n", mark_id);
+          __u32 cpu_num = bpf_get_smp_processor_id();
+          void *hw_accel_map = bpf_map_lookup_elem(&hw_accel_mapping, &cpu_num);
+          void *hw_accel_map2 = bpf_map_lookup_elem(&hw_accel_mapping2, &cpu_num);
 
-                      hw_flow.vip_num = vip_num;
-                      hw_flow.real_key = pckt.real_index;
-                      hw_flow.flow = pckt.flow;
-
-                      __u32 value = mark_id;
-
-                      //bpf_debug("calling bpf_map_update_elem for mark_id=%u, vip_num=%u, real_key=%u\n",
-                      //          mark_id, hw_flow.vip_num, hw_flow.real_key);
-                      if ((ret = bpf_map_update_elem(hw_accel_map, &mark_id, &hw_flow, BPF_ANY)) != 0) {
-                          bpf_debug("bpf_map_update_elem() failed: %d\n", ret);
-                          deallocate_hw_mark_id(cpu_num, mark_id);
-                      }
-                      else if ((ret = bpf_map_update_elem(hw_accel_map2, &pckt.flow, &value, BPF_ANY)) != 0) {
-                          bpf_debug("bpf_map_update_elem() failed: %d\n", ret);
-                          deallocate_hw_mark_id(cpu_num, mark_id);
-                      }
-                      else
-                      {
-                          /* Metadata will be in the perf event before the packet data. */
-                          struct hw_accel_event metadata;
-                          __u64 flags;
-                          __u16 sample_size;
-
-                          /* The XDP perf_event_output handler will use the upper 32 bits
-                           * of the flags argument as a number of bytes to include of the
-                           * packet payload in the event data. If the size is too big, the
-                           * call to bpf_perf_event_output will fail and return -EFAULT.
-                           *
-                           * See bpf_xdp_event_output in net/core/filter.c.
-                           *
-                           * The BPF_F_CURRENT_CPU flag means that the event output fd
-                           * will be indexed by the CPU number in the event map.
-                           */
-                          flags = BPF_F_CURRENT_CPU;
-                          sample_size = 16;
-
-                          metadata.real_ip = dst->dst;
-                          metadata.mark_id = mark_id;
-                          metadata.rx_queue_index = ctx->rx_queue_index;
-                          metadata.flow = pckt.flow;
-
-                          flags |= (__u64)sample_size << 32;
-
-                          bpf_debug("calling bpf_perf_event_output()\n");
-                          ret = bpf_perf_event_output(ctx, &hw_accel_events, flags, &metadata, sizeof(metadata));
-                          if (ret)
-                              bpf_debug("bpf_perf_event_output() failed: %d\n", ret);
-                      }
-                  }
-              }
+          if (unlikely(!hw_accel_map))
+          {
+              bpf_error("%u ERR1\n", cpu_num);
+              break;
           }
-      }
+          if (unlikely(!hw_accel_map2))
+          {
+              bpf_error("%u ERR2\n", cpu_num);
+              break;
+          }
+
+          void *existing_mark = bpf_map_lookup_elem(hw_accel_map2, &pckt.flow);
+          if (unlikely(existing_mark))
+          {
+              bpf_error("Already marked\n");
+              break;
+          }
+
+          __u32 mark_id = allocate_hw_mark_id(cpu_num);
+          if (!mark_id)
+          {
+              bpf_error("Failed to allocate mark_id\n");
+              break;
+          }
+
+          //__u32 cpu_id = bpf_get_smp_processor_id();
+          //bpf_debug("allocated mark_id %u on CPU %u\n", mark_id, cpu_id);
+
+          struct hw_accel_flow hw_flow;
+
+          __builtin_memset(&hw_flow, 0, sizeof(hw_flow));
+          hw_flow.vip_num = vip_num;
+          hw_flow.real_key = pckt.real_index;
+          __builtin_memcpy(&(hw_flow.flow), &(pckt.flow), sizeof(pckt.flow));
+          hw_flow.is_ipv6 = is_ipv6;
+
+          __u32 value = mark_id;
+
+          //bpf_error("flow_key=%u, hw_accel_flow=%u\n", (unsigned int)sizeof(hw_flow.flow), (unsigned int)sizeof(hw_flow));
+          //bpf_debug("calling bpf_map_update_elem for mark_id=%u, vip_num=%u, real_key=%u\n",
+          //          mark_id, hw_flow.vip_num, hw_flow.real_key);
+          int ret = bpf_map_update_elem(hw_accel_map, &mark_id, &hw_flow, BPF_ANY);
+          if (unlikely(ret != 0))
+          {
+              bpf_debug("UPD1 fail: %d\n", ret);
+              deallocate_hw_mark_id(cpu_num, mark_id);
+              break;
+          }
+
+          ret = bpf_map_update_elem(hw_accel_map2, &pckt.flow, &value, BPF_ANY);
+          if (unlikely(ret != 0))
+          {
+              bpf_debug("UPD2 fail: %d\n", ret);
+              bpf_map_delete_elem(hw_accel_map, &mark_id);
+              deallocate_hw_mark_id(cpu_num, mark_id);
+              break;
+          }
+
+          /* Metadata will be in the perf event before the packet data. */
+          struct hw_accel_event metadata;
+
+          /* The XDP perf_event_output handler will use the upper 32 bits
+           * of the flags argument as a number of bytes to include of the
+           * packet payload in the event data. If the size is too big, the
+           * call to bpf_perf_event_output will fail and return -EFAULT.
+           *
+           * See bpf_xdp_event_output in net/core/filter.c.
+           *
+           * The BPF_F_CURRENT_CPU flag means that the event output fd
+           * will be indexed by the CPU number in the event map.
+           */
+
+          metadata.real_ip = dst->dst;
+          metadata.mark_id = mark_id;
+          metadata.rx_queue_index = ctx->rx_queue_index;
+          metadata.flow = pckt.flow;
+
+          __u64 flags = BPF_F_CURRENT_CPU;
+          //flags |= (__u64)sample_size << 32;
+          flags |= (__u64)4 << 32;
+
+          bpf_debug("EVENT\n");
+          ret = bpf_perf_event_output(ctx, &hw_accel_events, flags, &metadata, sizeof(metadata));
+          if (unlikely(ret != 0))
+          {
+              bpf_error("EVENT failed: %d\n", ret);
+          }
+      } while (0);
   }
-  bpf_debug("XDP_TX\n\n");
+//  bpf_debug("XDP_TX\n\n");
 #endif /* HW_ACCELERATION_ENABLED */
 
   return XDP_TX;
@@ -757,6 +799,7 @@ SEC("xdp-balancer")
 int balancer_ingress(struct xdp_md *ctx) {
   void *data = (void *) (uintptr_t)ctx->data;
   void *data_end = (void *)(uintptr_t)ctx->data_end;
+#ifndef HW_ACCELERATION_ENABLED
   struct eth_hdr *eth = data;
   __u32 eth_proto;
   __u32 nh_off;
@@ -778,10 +821,9 @@ int balancer_ingress(struct xdp_md *ctx) {
     // pass to tcp/ip stack
     return XDP_PASS;
   }
-#ifdef HW_ACCELERATION_ENABLED
-  return process_packet(ctx, data, nh_off, data_end, is_ipv6, ctx);
-#else
   return process_packet(data, nh_off, data_end, is_ipv6, ctx);
+#else
+  return process_packet(ctx, data, data_end, ctx);
 #endif
 }
 

@@ -91,6 +91,7 @@ struct hw_accel_flow {
     uint32_t        vip_num;
     uint32_t        real_key;
     struct flow_key flow;
+    uint8_t         is_ipv6;
 };
 
 struct hw_accel_event {
