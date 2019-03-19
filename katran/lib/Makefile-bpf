@@ -29,6 +29,7 @@ CFLAGS += -DHW_ACCELERATION_ENABLED
 #  make samples/bpf/ LLC=~/git/llvm/build/bin/llc CLANG=~/git/llvm/build/bin/clang
 LLC ?= llc
 CLANG ?= clang
+OBJDUMP ?= llvm-objdump
 
 # Trick to allow make to be run from this directory
 all: $(always)
@@ -43,4 +44,5 @@ $(obj)/bpf/%.o: $(src)/bpf/%.c
 	$(DEBUGBPF) -D__KERNEL__ -Wno-unused-value -Wno-pointer-sign \
 		-Wno-compare-distinct-pointer-types \
 		-O2 -emit-llvm -c -g $< -o -| $(LLC) -march=bpf -filetype=obj -o $@
+	$(OBJDUMP) -d $@ > $(@D)/$*.bpf
 
