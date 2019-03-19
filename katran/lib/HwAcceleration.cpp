@@ -40,7 +40,6 @@ extern "C" {
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <linux/perf_event.h>
-#include <linux/bpf.h>
 #include <net/if.h>
 #include <netinet/in.h>
 }
@@ -129,7 +128,7 @@ static int setup_tc_rule(struct flow_key *flow, uint32_t mark_id, uint32_t rx_qu
     (void)rx_queue;
 
     snprintf(buffer, sizeof(buffer),
-            "tc filter add dev %s protocol ip parent ffff: flower indev %s skip_sw ip_proto %u src_ip %s dst_ip %s src_port %u dst_port %u action skbedit mark %u",
+            "tc filter add dev %s protocol ip parent ffff: flower indev %s skip_sw ip_proto %x src_ip %s dst_ip %s src_port %u dst_port %u action skbedit mark %u",
              tc_if_name, tc_if_name, (unsigned int) flow->proto, src_ip_str, dst_ip_str, src_port, dst_port, mark_id);
 
     ret = run_system_command(buffer, &ret_code);
