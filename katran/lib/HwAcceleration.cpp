@@ -108,6 +108,10 @@ static int run_system_command(const char *cmd, int *ret_code)
 
 static int setup_tc_rule(struct flow_key *flow, uint32_t mark_id, uint32_t rx_queue)
 {
+    static bool env_ok = false;
+    static bool print_tc_rule = false;
+    static uint64_t num_rules = 0;
+    bool print_stats = false;
     int ret, ret_code;
     char src_ip_str[64], dst_ip_str[64];
     unsigned int src_port, dst_port;
@@ -128,8 +132,16 @@ static int setup_tc_rule(struct flow_key *flow, uint32_t mark_id, uint32_t rx_qu
     (void)rx_queue;
 
     snprintf(buffer, sizeof(buffer),
-            "tc filter add dev %s protocol ip parent ffff: flower indev %s skip_sw ip_proto %x src_ip %s dst_ip %s src_port %u dst_port %u action skbedit mark %u",
+            "tc filter add dev %s protocol ip prio 1 parent ffff: flower indev %s skip_sw ip_proto %x src_ip %s dst_ip %s src_port %u dst_port %u action skbedit mark %u",
              tc_if_name, tc_if_name, (unsigned int) flow->proto, src_ip_str, dst_ip_str, src_port, dst_port, mark_id);
+
+    if (!env_ok)
+    {
+        if (getenv("KATRAN_PRINT_TC_RULE") != NULL)
+            print_tc_rule = true;
+    }
+    if (print_tc_rule)
+        printf("%s\n", buffer);
 
     ret = run_system_command(buffer, &ret_code);
     if (ret != 0)
@@ -138,6 +150,37 @@ static int setup_tc_rule(struct flow_key *flow, uint32_t mark_id, uint32_t rx_qu
     if (ret_code != 0) {
         LOG(ERROR) << "Command '" << buffer << "' returned " << ret_code << " probably failed.";
     }
+    else {
+        num_rules++;
+        if (num_rules < 1000UL)
+        {
+            if (num_rules < 100UL)
+            {
+                if (num_rules < 10UL)
+                {
+                    print_stats = true;
+                }
+                else
+                {
+                    if ((num_rules % 10UL) == 0)
+                        print_stats = true;
+                }
+            }
+            else
+            {
+                if ((num_rules % 100UL) == 0)
+                    print_stats = true;
+            }
+        }
+        else
+        {
+            if ((num_rules % 1000UL) == 0)
+                print_stats = true;
+        }
+    }
+
+    if (print_stats)
+        printf("Installed %lu TC rules\n", num_rules);
 
     return 0;
 }
