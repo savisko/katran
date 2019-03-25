@@ -256,7 +256,7 @@ void KatranLb::initLrus() {
     }
     int lru_fd, hw_accel_fd, numa_node;
     auto per_core_lru_size = config_.LruSize / forwardingCores_.size();
-    VLOG(2) << "per core lru size: " << per_core_lru_size;
+    LOG(INFO) << "per core lru size: " << per_core_lru_size;
     for (int i = 0; i < forwardingCores_.size(); i++) {
       auto core = forwardingCores_[i];
       if ((core > kMaxForwardingCores) || core < 0) {
@@ -316,11 +316,11 @@ void KatranLb::initLrus() {
     if (config_.enableHwAccel) {
       hw_accel_proto_fd = createHwAccelMap();
       if (hw_accel_proto_fd < 0) {
-        throw std::runtime_error("can't create prototype map for test lru");
+        throw std::runtime_error("can't create prototype map for HW acceleration");
       }
       hw_accel_proto_fd2 = createHwAccelMap2();
       if (hw_accel_proto_fd2 < 0) {
-        throw std::runtime_error("can't create prototype map for test lru");
+        throw std::runtime_error("can't create prototype map2 for HW acceleration");
       }
     }
   }
